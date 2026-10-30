@@ -1,0 +1,624 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// MODULE 01 · TÀI KHOẢN & QUẢN LÝ PHÒNG
+// ==========================================
+
+model User {
+  id            String   @id @default(uuid()) @db.Uuid
+  fullName      String   @map("full_name") @db.VarChar(150)
+  email         String   @unique @db.VarChar(255)
+  phone         String   @unique @db.VarChar(20)
+  passwordHash  String   @map("password_hash") @db.Text
+  role          String   @db.VarChar(20)
+  accountStatus String   @map("account_status") @db.VarChar(25)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  // Relations
+  landlordApplicationsAsApplicant LandlordApplication[] @relation("ApplicantUser")
+  landlordApplicationsAsReviewer  LandlordApplication[] @relation("ReviewerUser")
+  properties                      Property[]
+  viewingAppointmentsAsTenant     ViewingAppointment[]  @relation("TenantViewingAppointments")
+  viewingAppointmentsAsViewedBy   ViewingAppointment[]  @relation("ViewedByViewingAppointments")
+  proposedTimeOptions             ViewingTimeOption[]
+  rentalRequests                  RentalRequest[]
+  contracts                       Contract[]
+  contractResidents               ContractResident[]
+  residentInvitationsReceived     ResidentInvitation[]  @relation("InvitedUser")
+  residentInvitationsSent         ResidentInvitation[]  @relation("InvitedByUser")
+  depositReceiptsConfirmed        DepositReceipt[]
+  paymentProofsSubmitted          InvoicePaymentProof[] @relation("PaymentProofSubmittedBy")
+  paymentProofsConfirmed          InvoicePaymentProof[] @relation("PaymentProofConfirmedBy")
+  renewalRequests                 RenewalRequest[]
+  terminationNotices              TerminationNotice[]
+  repairTicketsCreated            RepairTicket[]
+  repairAttachmentsUploaded       RepairAttachment[]
+  roommateProfile                 RoommateProfile?
+  complaintsReported              Complaint[]           @relation("ComplaintReporter")
+  complaintsTargeted              Complaint[]           @relation("ComplaintTargetUser")
+  complaintsHandled               Complaint[]           @relation("ComplaintHandledBy")
+  auditLogs                       AuditLog[]
+  notifications                   Notification[]
+
+  @@map("users")
+}
+
+model LandlordApplication {
+  id                String    @id @default(uuid()) @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  reviewerId        String?   @map("reviewer_id") @db.Uuid
+  cccdFrontUrl      String    @map("cccd_front_url") @db.Text
+  cccdBackUrl       String    @map("cccd_back_url") @db.Text
+  ownershipProofUrl String    @map("ownership_proof_url") @db.Text
+  status            String    @db.VarChar(20)
+  rejectionReason   String?   @map("rejection_reason") @db.Text
+  submittedAt       DateTime  @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  reviewedAt        DateTime? @map("reviewed_at") @db.Timestamptz(6)
+
+  // Relations
+  user     User  @relation("ApplicantUser", fields: [userId], references: [id], onDelete: Restrict)
+  reviewer User? @relation("ReviewerUser", fields: [reviewerId], references: [id], onDelete: SetNull)
+
+  @@map("landlord_applications")
+}
+
+model Property {
+  id            String   @id @default(uuid()) @db.Uuid
+  landlordId    String   @map("landlord_id") @db.Uuid
+  name          String   @db.VarChar(200)
+  address       String   @db.Text
+  houseRules    String?  @map("house_rules") @db.Text
+  coverImageUrl String?  @map("cover_image_url") @db.Text
+  status        String   @db.VarChar(20)
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  landlord          User              @relation(fields: [landlordId], references: [id], onDelete: Restrict)
+  rooms             Room[]
+  propertyAmenities PropertyAmenity[]
+  repairTickets     RepairTicket[]
+
+  @@map("properties")
+}
+
+model Room {
+  id               String   @id @default(uuid()) @db.Uuid
+  propertyId       String   @map("property_id") @db.Uuid
+  roomCode         String   @map("room_code") @db.VarChar(50)
+  floor            Int?
+  areaM2           Decimal  @map("area_m2") @db.Decimal(8, 2)
+  maxOccupants     Int      @map("max_occupants")
+  monthlyRent      Decimal  @map("monthly_rent") @db.Decimal(14, 2)
+  depositRequired  Decimal  @map("deposit_required") @db.Decimal(14, 2)
+  electricityRate  Decimal  @map("electricity_rate") @db.Decimal(12, 2)
+  waterRate        Decimal  @map("water_rate") @db.Decimal(12, 2)
+  occupancyStatus  String   @map("occupancy_status") @db.VarChar(25)
+  visibilityStatus String   @map("visibility_status") @db.VarChar(25)
+  isArchived       Boolean  @default(false) @map("is_archived")
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  property            Property             @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  roomAmenities       RoomAmenity[]
+  images              RoomImage[]
+  serviceFees         RoomServiceFee[]
+  viewingAppointments ViewingAppointment[]
+  rentalRequests      RentalRequest[]
+  contracts           Contract[]
+  repairTickets       RepairTicket[]
+  complaints          Complaint[]
+
+  @@map("rooms")
+}
+
+model Amenity {
+  id    String @id @default(uuid()) @db.Uuid
+  name  String @unique @db.VarChar(100)
+  scope String @db.VarChar(20)
+
+  // Relations
+  propertyAmenities PropertyAmenity[]
+  roomAmenities     RoomAmenity[]
+
+  @@map("amenities")
+}
+
+model PropertyAmenity {
+  propertyId String @map("property_id") @db.Uuid
+  amenityId  String @map("amenity_id") @db.Uuid
+
+  // Relations
+  property Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  amenity  Amenity  @relation(fields: [amenityId], references: [id], onDelete: Cascade)
+
+  @@id([propertyId, amenityId])
+  @@map("property_amenities")
+}
+
+model RoomAmenity {
+  roomId    String @map("room_id") @db.Uuid
+  amenityId String @map("amenity_id") @db.Uuid
+
+  // Relations
+  room    Room    @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  amenity Amenity @relation(fields: [amenityId], references: [id], onDelete: Cascade)
+
+  @@id([roomId, amenityId])
+  @@map("room_amenities")
+}
+
+model RoomImage {
+  id        String   @id @default(uuid()) @db.Uuid
+  roomId    String   @map("room_id") @db.Uuid
+  imageUrl  String   @map("image_url") @db.Text
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@map("room_images")
+}
+
+model RoomServiceFee {
+  id            String  @id @default(uuid()) @db.Uuid
+  roomId        String  @map("room_id") @db.Uuid
+  feeName       String  @map("fee_name") @db.VarChar(100)
+  monthlyAmount Decimal @map("monthly_amount") @db.Decimal(14, 2)
+  isRequired    Boolean @default(false) @map("is_required")
+
+  // Relations
+  room Room @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@map("room_service_fees")
+}
+
+// ==========================================
+// MODULE 02 · LỊCH HẸN & HỢP ĐỒNG
+// ==========================================
+
+model ViewingAppointment {
+  id             String   @id @default(uuid()) @db.Uuid
+  roomId         String   @map("room_id") @db.Uuid
+  tenantId       String   @map("tenant_id") @db.Uuid
+  contactPhone   String   @map("contact_phone") @db.VarChar(20)
+  status         String   @db.VarChar(30)
+  selectedSlotId String?  @map("selected_slot_id") @db.Uuid
+  viewedById     String?  @map("viewed_by_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  room         Room                @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  tenant       User                @relation("TenantViewingAppointments", fields: [tenantId], references: [id], onDelete: Restrict)
+  selectedSlot ViewingTimeOption?  @relation("SelectedSlot", fields: [selectedSlotId], references: [id], onDelete: SetNull)
+  viewedBy     User?               @relation("ViewedByViewingAppointments", fields: [viewedById], references: [id], onDelete: SetNull)
+  timeOptions  ViewingTimeOption[] @relation("AppointmentOptions")
+
+  @@map("viewing_appointments")
+}
+
+model ViewingTimeOption {
+  id            String   @id @default(uuid()) @db.Uuid
+  appointmentId String   @map("appointment_id") @db.Uuid
+  proposedBy    String   @map("proposed_by") @db.Uuid
+  startAt       DateTime @map("start_at") @db.Timestamptz(6)
+  isSelected    Boolean  @default(false) @map("is_selected")
+
+  // Relations
+  appointment            ViewingAppointment   @relation("AppointmentOptions", fields: [appointmentId], references: [id], onDelete: Cascade)
+  proposer               User                 @relation(fields: [proposedBy], references: [id], onDelete: Restrict)
+  selectedInAppointments ViewingAppointment[] @relation("SelectedSlot")
+
+  @@map("viewing_time_options")
+}
+
+model RentalRequest {
+  id               String    @id @default(uuid()) @db.Uuid
+  roomId           String    @map("room_id") @db.Uuid
+  tenantId         String    @map("tenant_id") @db.Uuid
+  desiredStartDate DateTime  @map("desired_start_date") @db.Date
+  status           String    @db.VarChar(20)
+  reviewedAt       DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  room      Room       @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  tenant    User       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  contracts Contract[]
+
+  @@map("rental_requests")
+}
+
+model Contract {
+  id                String    @id @default(uuid()) @db.Uuid
+  roomId            String    @map("room_id") @db.Uuid
+  tenantId          String    @map("tenant_id") @db.Uuid
+  rentalRequestId   String?   @map("rental_request_id") @db.Uuid
+  renewedFromId     String?   @map("renewed_from_id") @db.Uuid
+  startDate         DateTime  @map("start_date") @db.Date
+  endDate           DateTime  @map("end_date") @db.Date
+  status            String    @db.VarChar(28)
+  pendingMoveout    Boolean   @default(false) @map("pending_moveout")
+  rentSnapshot      Decimal   @map("rent_snapshot") @db.Decimal(14, 2)
+  depositSnapshot   Decimal   @map("deposit_snapshot") @db.Decimal(14, 2)
+  electricityRate   Decimal   @map("electricity_rate") @db.Decimal(12, 2)
+  waterRate         Decimal   @map("water_rate") @db.Decimal(12, 2)
+  depositCarried    Decimal   @default(0) @map("deposit_carried") @db.Decimal(14, 2)
+  acceptedAt        DateTime? @map("accepted_at") @db.Timestamptz(6)
+  depositDeadlineAt DateTime? @map("deposit_deadline_at") @db.Timestamptz(6)
+  activatedAt       DateTime? @map("activated_at") @db.Timestamptz(6)
+
+  // Relations
+  room                Room                 @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  tenant              User                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  rentalRequest       RentalRequest?       @relation(fields: [rentalRequestId], references: [id], onDelete: Restrict)
+  renewedFrom         Contract?            @relation("ContractRenewals", fields: [renewedFromId], references: [id], onDelete: Restrict)
+  renewedContracts    Contract[]           @relation("ContractRenewals")
+  contractServiceFees ContractServiceFee[]
+  handoverRecord      HandoverRecord?
+  contractResidents   ContractResident[]
+  residentInvitations ResidentInvitation[]
+  depositReceipts     DepositReceipt[]
+  invoices            Invoice[]
+  renewalRequests     RenewalRequest[]
+  terminationNotices  TerminationNotice[]
+  liquidation         Liquidation?
+
+  @@map("contracts")
+}
+
+model ContractServiceFee {
+  id            String  @id @default(uuid()) @db.Uuid
+  contractId    String  @map("contract_id") @db.Uuid
+  feeName       String  @map("fee_name") @db.VarChar(100)
+  monthlyAmount Decimal @map("monthly_amount") @db.Decimal(14, 2)
+
+  // Relations
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+
+  @@map("contract_service_fees")
+}
+
+model HandoverRecord {
+  id               String   @id @default(uuid()) @db.Uuid
+  contractId       String   @unique @map("contract_id") @db.Uuid
+  handoverAt       DateTime @default(now()) @map("handover_at") @db.Timestamptz(6)
+  electricityE0    Decimal  @map("electricity_e0") @db.Decimal(12, 3)
+  waterW0          Decimal  @map("water_w0") @db.Decimal(12, 3)
+  electricPhotoUrl String   @map("electric_photo_url") @db.Text
+  waterPhotoUrl    String   @map("water_photo_url") @db.Text
+
+  // Relations
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+
+  @@map("handover_records")
+}
+
+model ContractResident {
+  contractId String    @map("contract_id") @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  joinedAt   DateTime  @default(now()) @map("joined_at") @db.Timestamptz(6)
+  leftAt     DateTime? @map("left_at") @db.Timestamptz(6)
+
+  // Relations
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@id([contractId, userId])
+  @@map("contract_residents")
+}
+
+model ResidentInvitation {
+  id            String    @id @default(uuid()) @db.Uuid
+  contractId    String    @map("contract_id") @db.Uuid
+  invitedUserId String    @map("invited_user_id") @db.Uuid
+  invitedById   String    @map("invited_by_id") @db.Uuid
+  status        String    @db.VarChar(20)
+  expiresAt     DateTime  @map("expires_at") @db.Timestamptz(6)
+  acceptedAt    DateTime? @map("accepted_at") @db.Timestamptz(6)
+
+  // Relations
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  invitedUser User     @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Restrict)
+  invitedBy   User     @relation("InvitedByUser", fields: [invitedById], references: [id], onDelete: Restrict)
+
+  @@map("resident_invitations")
+}
+
+model DepositReceipt {
+  id              String    @id @default(uuid()) @db.Uuid
+  contractId      String    @map("contract_id") @db.Uuid
+  amount          Decimal   @db.Decimal(14, 2)
+  proofUrl        String    @map("proof_url") @db.Text
+  status          String    @db.VarChar(20)
+  submittedAt     DateTime  @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  confirmedById   String?   @map("confirmed_by_id") @db.Uuid
+  confirmedAt     DateTime? @map("confirmed_at") @db.Timestamptz(6)
+  rejectionReason String?   @map("rejection_reason") @db.Text
+
+  // Relations
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  confirmedBy User?    @relation(fields: [confirmedById], references: [id], onDelete: SetNull)
+
+  @@map("deposit_receipts")
+}
+
+// ==========================================
+// MODULE 03 · HÓA ĐƠN & ĐỐI SOÁT
+// ==========================================
+
+model Invoice {
+  id               String    @id @default(uuid()) @db.Uuid
+  contractId       String    @map("contract_id") @db.Uuid
+  adjustsInvoiceId String?   @map("adjusts_invoice_id") @db.Uuid
+  invoiceType      String    @map("invoice_type") @db.VarChar(25)
+  billingMonth     DateTime? @map("billing_month") @db.Date
+  status           String    @db.VarChar(25)
+  baseAmount       Decimal   @map("base_amount") @db.Decimal(14, 2)
+  oldDebt          Decimal   @default(0) @map("old_debt") @db.Decimal(14, 2)
+  totalAmount      Decimal   @map("total_amount") @db.Decimal(14, 2)
+  dueAt            DateTime? @map("due_at") @db.Timestamptz(6)
+  issuedAt         DateTime? @map("issued_at") @db.Timestamptz(6)
+
+  // Relations
+  contract           Contract              @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  adjustsInvoice     Invoice?              @relation("InvoiceAdjustments", fields: [adjustsInvoiceId], references: [id], onDelete: Restrict)
+  adjustmentInvoices Invoice[]             @relation("InvoiceAdjustments")
+  items              InvoiceItem[]
+  meterReadings      MeterReading[]
+  paymentProofs      InvoicePaymentProof[]
+  liquidation        Liquidation?
+
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String  @id @default(uuid()) @db.Uuid
+  invoiceId   String  @map("invoice_id") @db.Uuid
+  itemType    String  @map("item_type") @db.VarChar(25)
+  description String  @db.Text
+  quantity    Decimal @db.Decimal(12, 3)
+  unitPrice   Decimal @map("unit_price") @db.Decimal(14, 2)
+  amount      Decimal @db.Decimal(14, 2)
+  reason      String? @db.Text
+  evidenceUrl String? @map("evidence_url") @db.Text
+
+  // Relations
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@map("invoice_items")
+}
+
+model MeterReading {
+  id            String   @id @default(uuid()) @db.Uuid
+  invoiceId     String   @map("invoice_id") @db.Uuid
+  meterType     String   @map("meter_type") @db.VarChar(12)
+  previousValue Decimal  @map("previous_value") @db.Decimal(12, 3)
+  currentValue  Decimal  @map("current_value") @db.Decimal(12, 3)
+  unitPrice     Decimal  @map("unit_price") @db.Decimal(12, 2)
+  photoUrl      String   @map("photo_url") @db.Text
+  recordedAt    DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  // Relations
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@map("meter_readings")
+}
+
+model InvoicePaymentProof {
+  id              String    @id @default(uuid()) @db.Uuid
+  invoiceId       String    @map("invoice_id") @db.Uuid
+  submittedById   String    @map("submitted_by_id") @db.Uuid
+  amountReported  Decimal   @map("amount_reported") @db.Decimal(14, 2)
+  proofUrl        String    @map("proof_url") @db.Text
+  status          String    @db.VarChar(20)
+  confirmedById   String?   @map("confirmed_by_id") @db.Uuid
+  reviewedAt      DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  rejectionReason String?   @map("rejection_reason") @db.Text
+
+  // Relations
+  invoice     Invoice @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+  submittedBy User    @relation("PaymentProofSubmittedBy", fields: [submittedById], references: [id], onDelete: Restrict)
+  confirmedBy User?   @relation("PaymentProofConfirmedBy", fields: [confirmedById], references: [id], onDelete: SetNull)
+
+  @@map("invoice_payment_proofs")
+}
+
+// ==========================================
+// MODULE 04 · GIA HẠN, TRẢ PHÒNG & SỰ CỐ
+// ==========================================
+
+model RenewalRequest {
+  id              String    @id @default(uuid()) @db.Uuid
+  contractId      String    @map("contract_id") @db.Uuid
+  requestedById   String    @map("requested_by_id") @db.Uuid
+  proposedEndDate DateTime  @map("proposed_end_date") @db.Date
+  proposedRent    Decimal?  @map("proposed_rent") @db.Decimal(14, 2)
+  status          String    @db.VarChar(20)
+  acceptedAt      DateTime? @map("accepted_at") @db.Timestamptz(6)
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  requestedBy User     @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@map("renewal_requests")
+}
+
+model TerminationNotice {
+  id             String   @id @default(uuid()) @db.Uuid
+  contractId     String   @map("contract_id") @db.Uuid
+  requestedById  String   @map("requested_by_id") @db.Uuid
+  noticeDate     DateTime @map("notice_date") @db.Date
+  plannedMoveout DateTime @map("planned_moveout") @db.Date
+  reason         String?  @db.Text
+  status         String   @db.VarChar(20)
+
+  // Relations
+  contract    Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  requestedBy User     @relation(fields: [requestedById], references: [id], onDelete: Restrict)
+
+  @@map("termination_notices")
+}
+
+model Liquidation {
+  id               String    @id @default(uuid()) @db.Uuid
+  contractId       String    @unique @map("contract_id") @db.Uuid
+  invoiceId        String    @unique @map("invoice_id") @db.Uuid
+  actualMoveout    DateTime? @map("actual_moveout") @db.Date
+  depositCredit    Decimal   @map("deposit_credit") @db.Decimal(14, 2)
+  finalBalance     Decimal   @map("final_balance") @db.Decimal(14, 2)
+  status           String    @db.VarChar(25)
+  responseDeadline DateTime? @map("response_deadline") @db.Timestamptz(6)
+  inspectionUrl    String?   @map("inspection_url") @db.Text
+  unilateralReason String?   @map("unilateral_reason") @db.Text
+  finalizedAt      DateTime? @map("finalized_at") @db.Timestamptz(6)
+
+  // Relations
+  contract Contract @relation(fields: [contractId], references: [id], onDelete: Restrict)
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@map("liquidations")
+}
+
+model RepairTicket {
+  id          String    @id @default(uuid()) @db.Uuid
+  propertyId  String    @map("property_id") @db.Uuid
+  roomId      String?   @map("room_id") @db.Uuid
+  createdById String    @map("created_by_id") @db.Uuid
+  title       String    @db.VarChar(200)
+  description String    @db.Text
+  status      String    @db.VarChar(28)
+  scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  closedAt    DateTime? @map("closed_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  property    Property           @relation(fields: [propertyId], references: [id], onDelete: Restrict)
+  room        Room?              @relation(fields: [roomId], references: [id], onDelete: Restrict)
+  createdBy   User               @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  attachments RepairAttachment[]
+  complaints  Complaint[]
+
+  @@map("repair_tickets")
+}
+
+model RepairAttachment {
+  id           String  @id @default(uuid()) @db.Uuid
+  ticketId     String  @map("ticket_id") @db.Uuid
+  uploadedById String  @map("uploaded_by_id") @db.Uuid
+  fileUrl      String  @map("file_url") @db.Text
+  stage        String  @db.VarChar(25)
+  reason       String? @db.Text
+
+  // Relations
+  ticket     RepairTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  uploadedBy User         @relation(fields: [uploadedById], references: [id], onDelete: Restrict)
+
+  @@map("repair_attachments")
+}
+
+// ==========================================
+// MODULE 05 · Ở GHÉP, KHIẾU NẠI & NHẬT KÝ
+// ==========================================
+
+model RoommateProfile {
+  id               String  @id @default(uuid()) @db.Uuid
+  userId           String  @unique @map("user_id") @db.Uuid
+  gender           String  @db.VarChar(12)
+  preferredGender  String  @map("preferred_gender") @db.VarChar(12)
+  districtKeyword  String  @map("district_keyword") @db.VarChar(180)
+  maxBudget        Decimal @map("max_budget") @db.Decimal(14, 2)
+  sleepSchedule    String  @map("sleep_schedule") @db.VarChar(20)
+  smoking          Boolean
+  hasPets          Boolean @map("has_pets")
+  cookingFrequency String  @map("cooking_frequency") @db.VarChar(20)
+  noiseLevel       String  @map("noise_level") @db.VarChar(20)
+  status           String  @db.VarChar(20)
+
+  // Relations
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  sentConnections     RoommateConnection[] @relation("SenderProfile")
+  receivedConnections RoommateConnection[] @relation("ReceiverProfile")
+
+  @@map("roommate_profiles")
+}
+
+model RoommateConnection {
+  id                String    @id @default(uuid()) @db.Uuid
+  senderProfileId   String    @map("sender_profile_id") @db.Uuid
+  receiverProfileId String    @map("receiver_profile_id") @db.Uuid
+  matchScore        Decimal?  @map("match_score") @db.Decimal(5, 2)
+  status            String    @db.VarChar(20)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  acceptedAt        DateTime? @map("accepted_at") @db.Timestamptz(6)
+
+  // Relations
+  senderProfile   RoommateProfile @relation("SenderProfile", fields: [senderProfileId], references: [id], onDelete: Restrict)
+  receiverProfile RoommateProfile @relation("ReceiverProfile", fields: [receiverProfileId], references: [id], onDelete: Restrict)
+
+  @@map("roommate_connections")
+}
+
+model Complaint {
+  id             String   @id @default(uuid()) @db.Uuid
+  reporterId     String   @map("reporter_id") @db.Uuid
+  targetUserId   String?  @map("target_user_id") @db.Uuid
+  targetRoomId   String?  @map("target_room_id") @db.Uuid
+  originTicketId String?  @map("origin_ticket_id") @db.Uuid
+  reason         String   @db.VarChar(60)
+  evidenceUrl    String   @map("evidence_url") @db.Text
+  status         String   @db.VarChar(25)
+  handledById    String?  @map("handled_by_id") @db.Uuid
+  resolution     String?  @db.Text
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  reporter     User          @relation("ComplaintReporter", fields: [reporterId], references: [id], onDelete: Restrict)
+  targetUser   User?         @relation("ComplaintTargetUser", fields: [targetUserId], references: [id], onDelete: SetNull)
+  targetRoom   Room?         @relation(fields: [targetRoomId], references: [id], onDelete: SetNull)
+  originTicket RepairTicket? @relation(fields: [originTicketId], references: [id], onDelete: SetNull)
+  handledBy    User?         @relation("ComplaintHandledBy", fields: [handledById], references: [id], onDelete: SetNull)
+
+  @@map("complaints")
+}
+
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  actorId    String?  @map("actor_id") @db.Uuid
+  entityType String   @map("entity_type") @db.VarChar(60)
+  entityId   String   @map("entity_id") @db.Uuid
+  action     String   @db.VarChar(60)
+  oldData    Json?    @map("old_data") @db.JsonB
+  newData    Json?    @map("new_data") @db.JsonB
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@map("audit_logs")
+}
+
+model Notification {
+  id          String   @id @default(uuid()) @db.Uuid
+  recipientId String   @map("recipient_id") @db.Uuid
+  title       String   @db.VarChar(200)
+  eventType   String   @map("event_type") @db.VarChar(40)
+  payload     Json?    @db.JsonB
+  isRead      Boolean  @default(false) @map("is_read")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  // Relations
+  recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@map("notifications")
+}
