@@ -1,54 +1,48 @@
+import { z } from 'zod';
 import { HttpError } from '../../common/http-error';
 
-type RegisterInput = {
-  fullName: string;
-  email: string;
-  phone: string;
-  password: string;
-};
+const passwordSchema = z.string()
+  .min(8, 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
+  .refine((value) => Buffer.byteLength(value, 'utf8') <= 72, 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
+  .refine((value) => /[a-z]/.test(value), 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
+  .refine((value) => /[A-Z]/.test(value), 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
+  .refine((value) => /\d/.test(value), 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
+  .refine((value) => /[^A-Za-z0-9]/.test(value), 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt');
 
-function objectBody(body: unknown): Record<string, unknown> {
-  if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw new HttpError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ');
-  }
-  return body as Record<string, unknown>;
-}
+const registerSchema = z.object({
+  fullName: z.string().trim().min(1, 'Họ tên phải từ 1 đến 150 ký tự').max(150, 'Họ tên phải từ 1 đến 150 ký tự'),
+  email: z.string().trim().toLowerCase().email('Email không hợp lệ').max(255, 'Email không hợp lệ'),
+  phone: z.string().trim().regex(/^0\d{9}$/, 'Số điện thoại phải gồm 10 chữ số và bắt đầu bằng 0'),
+  password: passwordSchema,
+  confirmPassword: z.string(),
+  acceptedTerms: z.literal(true, { error: 'Cần đồng ý điều khoản' }),
+}).strict().refine((input) => input.password === input.confirmPassword, {
+  path: ['confirmPassword'],
+  message: 'Mật khẩu xác nhận không khớp',
+});
 
-function rejectUnknown(body: Record<string, unknown>, allowed: string[], errors: Record<string, string[]>) {
-  for (const key of Object.keys(body)) {
-    if (!allowed.includes(key)) errors[key] = ['Trường không được phép'];
-  }
-}
+const loginSchema = z.object({
+  username: z.string().trim().toLowerCase().min(1, 'Cần email hoặc số điện thoại'),
+  password: z.string().min(1, 'Cần mật khẩu').refine((value) => Buffer.byteLength(value, 'utf8') <= 72, 'Mật khẩu không được vượt 72 byte UTF-8'),
+}).strict();
 
-export function parseRegister(body: unknown): RegisterInput {
-  const input = objectBody(body);
+function parse<T>(schema: z.ZodType<T>, body: unknown): T {
+  const result = schema.safeParse(body);
+  if (result.success) return result.data;
+
   const errors: Record<string, string[]> = {};
-  rejectUnknown(input, ['fullName', 'email', 'phone', 'password', 'confirmPassword', 'acceptedTerms'], errors);
-  const fullName = typeof input.fullName === 'string' ? input.fullName.trim() : '';
-  const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
-  const phone = typeof input.phone === 'string' ? input.phone.trim() : '';
-  const password = typeof input.password === 'string' ? input.password : '';
-  if (!fullName || fullName.length > 150) errors.fullName = ['Họ tên phải từ 1 đến 150 ký tự'];
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 255) errors.email = ['Email không hợp lệ'];
-  if (!/^0\d{9}$/.test(phone)) errors.phone = ['Số điện thoại phải gồm 10 chữ số và bắt đầu bằng 0'];
-  if (password.length < 8 || Buffer.byteLength(password, 'utf8') > 72 || !/[a-z]/.test(password) || !/[A-Z]/.test(password) || !/\d/.test(password) || !/[^A-Za-z0-9]/.test(password)) {
-    errors.password = ['Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt'];
+  for (const issue of result.error.issues) {
+    const field = issue.path.join('.') || '_';
+    (errors[field] ??= []).push(issue.message);
   }
-  if (input.confirmPassword !== password) errors.confirmPassword = ['Mật khẩu xác nhận không khớp'];
-  if (input.acceptedTerms !== true) errors.acceptedTerms = ['Cần đồng ý điều khoản'];
-  if (Object.keys(errors).length) throw new HttpError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', errors);
+  throw new HttpError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', errors);
+}
+
+export function parseRegister(body: unknown) {
+  const { fullName, email, phone, password } = parse(registerSchema, body);
   return { fullName, email, phone, password };
 }
 
-export function parseLogin(body: unknown): { username: string; password: string } {
-  const input = objectBody(body);
-  const errors: Record<string, string[]> = {};
-  rejectUnknown(input, ['username', 'password'], errors);
-  const username = typeof input.username === 'string' ? input.username.trim().toLowerCase() : '';
-  const password = typeof input.password === 'string' ? input.password : '';
-  if (!username) errors.username = ['Cần email hoặc số điện thoại'];
-  if (!password) errors.password = ['Cần mật khẩu'];
-  else if (Buffer.byteLength(password, 'utf8') > 72) errors.password = ['Mật khẩu không được vượt 72 byte UTF-8'];
-  if (Object.keys(errors).length) throw new HttpError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', errors);
-  return { username, password };
+export function parseLogin(body: unknown) {
+  return parse(loginSchema, body);
 }
