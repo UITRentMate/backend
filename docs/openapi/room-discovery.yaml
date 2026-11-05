@@ -1,0 +1,878 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Room Discovery API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả giao diện lập trình ứng dụng (API Contract) cho phân hệ **Tìm kiếm & Xem chi tiết phòng trọ công khai (Room Discovery Phase 1)** thuộc nền tảng RentMate.
+
+    ### Bối cảnh & Căn cứ kỹ thuật:
+    - **Môn học:** SE100 — Phát triển phần mềm hướng đối tượng (Nhóm 15, UIT).
+    - **Use Cases phục vụ:**
+      - `UC-09: Tìm kiếm và lọc phòng trọ`
+      - `UC-10: Xem thông tin phòng trọ`
+    - **Figma Prototype đối chiếu:**
+      - Landing Page: Node ID `11:2` (3 Featured Room Cards)
+      - Homepage: Node ID `121:1084` (Hero Search Bar, Bộ lọc nâng cao, Lưới phòng đang còn trống)
+      - Room Detail: Node ID `22:1609` (Trang chi tiết phòng đầy đủ)
+    - **Cơ sở dữ liệu:** Baseline 32 bảng của Prisma Schema trên nhánh `staging` (`backend/prisma/schema.prisma`).
+
+    ### Rào chắn an toàn & Phân loại quyết định:
+    - `[CONFIRMED]`: Đã có căn cứ vững chắc từ Prisma Schema (các model và trường dữ liệu thực tế có trong schema.prisma), hoặc quy chuẩn bảo mật bắt buộc.
+    - `[PROPOSED]`: Đề xuất kỹ thuật và chính sách nghiệp vụ (như quy tắc gộp 5 điều kiện hiển thị công khai, format phân trang, tiện ích gộp) đang chờ toàn nhóm thống nhất chính thức.
+    - `[NEEDS_DECISION]`: Quyết định nghiệp vụ/giao diện còn mở cần người dùng hoặc FE 2 chính thức thông qua.
+
+    ### Rào chắn bảo mật dữ liệu cá nhân:
+    - Mọi API trong tài liệu này đều là **Public Access** (không yêu cầu Bearer Token).
+    - Tuyệt đối không để lộ `phone`, `email`, `passwordHash`, hoặc hồ sơ CCCD của chủ trọ trong các phản hồi công khai.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development Server theo .env.example)
+tags:
+  - name: Room Discovery
+    description: Các endpoint tìm kiếm, lọc và xem thông tin chi tiết phòng trọ công khai dành cho khách vãng lai và người thuê.
+
+paths:
+  /api/v1/rooms/search:
+    get:
+      tags:
+        - Room Discovery
+      operationId: searchRooms
+      summary: Tìm kiếm và lọc danh sách phòng trọ công khai
+      description: |
+        Tra cứu danh sách các phòng trọ thỏa mãn bộ lọc đa tiêu chí (từ khóa, khoảng giá, diện tích, sức chứa, tiện ích, vị trí) kèm phân trang và sắp xếp ổn định.
+
+        **Quy tắc Public Visibility lọc phòng công khai [PROPOSED]:**
+        Đề xuất danh sách phòng công khai chỉ bao gồm các phòng thỏa mãn đồng thời 5 điều kiện sau (dựa trên các trường dữ liệu [CONFIRMED] trong Prisma Schema):
+        1. `Room.occupancyStatus === 'VACANT'` (Phòng đang trống về mặt vật lý).
+        2. `Room.visibilityStatus === 'VISIBLE'` (Chủ trọ đã chủ động bật công khai).
+        3. `Room.isArchived === false` (Phòng chưa bị xóa mềm/lưu trữ).
+        4. `Property.status === 'ACTIVE'` (Tòa nhà đang hoạt động bình thường).
+        5. `Property.landlord.accountStatus === 'ACTIVE'` (Tài khoản chủ trọ không bị khóa).
+
+        **Điều kiện bổ sung về tư cách chủ trọ [NEEDS_DECISION]:**
+        - `Property.landlord.role === 'LANDLORD'`
+        - Hồ sơ phê duyệt chủ trọ `LandlordApplication.status === 'APPROVED'`
+        Cần quyết định liệu query tìm kiếm có join bắt buộc `LandlordApplication` hay chỉ kiểm tra `accountStatus === 'ACTIVE'` và `role === 'LANDLORD'` của chủ trọ.
+
+        **Lưu ý về Featured Rooms trên Landing Page [PROPOSED]:**
+        Landing Page có thể tái sử dụng endpoint này với `page=1&pageSize=3&sortBy=newest` để hiển thị 3 phòng mới nhất. Hệ thống hiện chưa có cờ `isFeatured` hoặc thuật toán Recommendation tuyển chọn riêng.
+      security: []
+      parameters:
+        - name: keyword
+          in: query
+          required: false
+          description: Từ khóa tìm kiếm tự do (không phân biệt chữ hoa/thường). Khớp một trong ba trường `Room.roomCode`, `Property.name`, hoặc `Property.address`.
+          schema:
+            type: string
+            maxLength: 100
+          example: CMT8
+        - name: province
+          in: query
+          required: false
+          description: |
+            Tên Tỉnh/Thành phố cần lọc.
+            `[NEEDS_DECISION]` Do `Property.address` là chuỗi văn bản tự do, Backend sẽ tìm kiếm chuỗi con case-insensitive trên trường địa chỉ.
+          schema:
+            type: string
+            maxLength: 50
+          example: TP.HCM
+        - name: district
+          in: query
+          required: false
+          description: |
+            Tên Quận/Huyện cần lọc.
+            `[NEEDS_DECISION]` Kết hợp với `province` bằng toán tử AND trên chuỗi `Property.address`.
+          schema:
+            type: string
+            maxLength: 50
+          example: Quận 10
+        - name: minPrice
+          in: query
+          required: false
+          description: Mức giá thuê hàng tháng tối thiểu (VND). Phải là số dương lớn hơn hoặc bằng 0.
+          schema:
+            type: number
+            minimum: 0
+          example: 3000000
+        - name: maxPrice
+          in: query
+          required: false
+          description: Mức giá thuê hàng tháng tối đa (VND). Phải lớn hơn hoặc bằng `minPrice` (nếu cả hai cùng có mặt).
+          schema:
+            type: number
+            minimum: 0
+          example: 5000000
+        - name: minArea
+          in: query
+          required: false
+          description: Diện tích sử dụng tối thiểu (m²). Phải là số dương lớn hơn hoặc bằng 0.
+          schema:
+            type: number
+            minimum: 0
+          example: 20
+        - name: maxArea
+          in: query
+          required: false
+          description: Diện tích sử dụng tối đa (m²). Phải lớn hơn hoặc bằng `minArea` (nếu cả hai cùng có mặt).
+          schema:
+            type: number
+            minimum: 0
+          example: 40
+        - name: capacity
+          in: query
+          required: false
+          description: Số lượng người ở dự kiến. Lọc các phòng có sức chứa `maxOccupants >= capacity`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+          example: 2
+        - name: amenities
+          in: query
+          required: false
+          style: form
+          explode: false
+          description: |
+            Danh sách mã định danh UUID v4 của các tiện ích mong muốn, phân tách bởi dấu phẩy (CSV format trong query string: `?amenities=uuid1,uuid2`). Backend deserialize và validate từng UUID v4 sau khi phân tách.
+            `[PROPOSED]` Phòng được xem là thỏa mãn nếu có liên kết tiện ích ở cấp phòng (`RoomAmenity`) HOẶC cấp tòa nhà (`PropertyAmenity`). Sử dụng logic AND giữa các tiện ích.
+          schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+              pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          example:
+            - "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+            - "e4a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5f"
+        - name: sortBy
+          in: query
+          required: false
+          description: |
+            Tiêu chí sắp xếp kết quả:
+            - `newest`: Phòng mới đăng nhất (mặc định)
+            - `price_asc`: Giá tăng dần
+            - `price_desc`: Giá giảm dần
+            - `area_asc`: Diện tích tăng dần
+            - `area_desc`: Diện tích giảm dần
+            Mọi truy vấn đều áp dụng tie-breaker `id ASC` để bảo đảm phân trang ổn định.
+          schema:
+            type: string
+            enum:
+              - newest
+              - price_asc
+              - price_desc
+              - area_asc
+              - area_desc
+            default: newest
+          example: newest
+        - name: page
+          in: query
+          required: false
+          description: Số thứ tự trang hiện tại (bắt đầu từ 1). Không chấp nhận số <= 0.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: pageSize
+          in: query
+          required: false
+          description: Số lượng phòng trên một trang (từ 1 đến 50). Không chấp nhận số < 1 hoặc > 50.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 12
+          example: 12
+      responses:
+        '200':
+          description: Danh sách phòng trọ công khai thỏa mãn bộ lọc kèm thông tin phân trang.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRoomResponse'
+              examples:
+                matchedRooms:
+                  summary: Tìm thấy phòng khớp từ khóa CMT8 và khoảng giá
+                  value:
+                    items:
+                      - roomId: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+                        roomCode: "AG-302"
+                        title: "Khu trọ An Gia Building - Phòng AG-302"
+                        monthlyRent: 4500000
+                        areaM2: 28.0
+                        maxOccupants: 2
+                        occupancyStatus: "VACANT"
+                        coverImageUrl: "https://storage.rentmate.vn/rooms/ag-302-cover.jpg"
+                        address: "285/12 CMT8, Phường 12, Quận 10, TP.HCM"
+                        propertyId: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+                        propertyName: "Khu trọ An Gia Building"
+                        amenities:
+                          - "Máy lạnh Inverter"
+                          - "Ban công riêng"
+                          - "Thang máy"
+                      - roomId: "8c9d0e1f-4a3b-4b6c-82d3-e4f5a6b7c8d9"
+                        roomCode: "CMT-201"
+                        title: "Nhà trọ CMT8 Xanh - Phòng CMT-201"
+                        monthlyRent: 3800000
+                        areaM2: 24.5
+                        maxOccupants: 2
+                        occupancyStatus: "VACANT"
+                        coverImageUrl: "https://storage.rentmate.vn/rooms/cmt-201-cover.jpg"
+                        address: "450 CMT8, Phường 11, Quận 3, TP.HCM"
+                        propertyId: "b2c3d4e5-f6a7-4b9c-8d1e-2f3a4b5c6d7e"
+                        propertyName: "Nhà trọ CMT8 Xanh"
+                        amenities:
+                          - "Wifi tốc độ cao"
+                          - "Máy giặt riêng"
+                    page: 1
+                    pageSize: 12
+                    totalItems: 2
+                    totalPages: 1
+        '400':
+          description: Dữ liệu tham số truy vấn không hợp lệ (sai kiểu, số âm, khoảng min > max, page <= 0, pageSize > 50, UUID sai định dạng).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                invalidPriceRange:
+                  summary: Lỗi khoảng giá không hợp lệ (minPrice > maxPrice)
+                  value:
+                    success: false
+                    code: "VALIDATION_ERROR"
+                    message: "Dữ liệu tìm kiếm không hợp lệ"
+                    errors:
+                      maxPrice:
+                        - "maxPrice không được nhỏ hơn minPrice"
+                    traceId: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
+                invalidPagination:
+                  summary: Lỗi số trang hoặc kích thước trang vượt ngưỡng (page=0 hoặc pageSize=99)
+                  value:
+                    success: false
+                    code: "VALIDATION_ERROR"
+                    message: "Dữ liệu tìm kiếm không hợp lệ"
+                    errors:
+                      page:
+                        - "page phải là số nguyên dương lớn hơn hoặc bằng 1"
+                      pageSize:
+                        - "pageSize phải là số nguyên từ 1 đến 50"
+                    traceId: "a1c2e3f4-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+        '500':
+          description: Lỗi máy chủ nội bộ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                serverError:
+                  summary: Lỗi hệ thống ngoài dự kiến
+                  value:
+                    success: false
+                    code: "INTERNAL_SERVER_ERROR"
+                    message: "Đã có sự cố xảy ra trên hệ thống. Vui lòng thử lại sau."
+                    traceId: "e5f6a7b8-9c0d-41e2-8f3a-4b5c6d7e8f9a"
+
+  /api/v1/public/rooms/{roomId}:
+    get:
+      tags:
+        - Room Discovery
+      operationId: getPublicRoomDetail
+      summary: Xem chi tiết toàn diện phòng trọ công khai
+      description: |
+        Truy xuất toàn bộ thông số kỹ thuật, bảng giá minh bạch, bộ sưu tập hình ảnh, danh mục tiện ích, phí dịch vụ phát sinh, thông tin tòa nhà và hồ sơ công khai của chủ trọ để phục vụ màn hình Room Detail (`22:1609`).
+
+        **Quy tắc Public Visibility & Bảo mật dữ liệu [PROPOSED]:**
+        - Phòng bắt buộc phải thỏa mãn 5 điều kiện hiển thị công khai như SEARCH-01.
+        - Nếu phòng không tồn tại HOẶC vi phạm bất kỳ điều kiện công khai nào (bị ẩn, đã cho thuê, đang bảo trì, hoặc chủ trọ bị khóa tài khoản) -> Hệ thống lập tức phản hồi HTTP `404 Not Found`. Tuyệt đối không tiết lộ thông tin của phòng ẩn.
+        - Thông tin chủ trọ chỉ bao gồm `id`, `fullName`, và trạng thái chứng nhận `isVerified: boolean`. Tuyệt đối không trả về `phone`, `email`, `passwordHash`, hay tài liệu CCCD/sổ đỏ.
+      security: []
+      parameters:
+        - name: roomId
+          in: path
+          required: true
+          description: Khóa định danh UUID v4 duy nhất của phòng cần xem chi tiết.
+          schema:
+            type: string
+            format: uuid
+            pattern: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-4[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          example: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+      responses:
+        '200':
+          description: Thông tin chi tiết phòng trọ công khai hợp lệ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicRoomDetailDTO'
+              examples:
+                roomDetailSuccess:
+                  summary: Chi tiết phòng AG-302 thuộc Khu trọ An Gia Building
+                  value:
+                    roomId: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+                    roomCode: "AG-302"
+                    title: "Khu trọ An Gia Building - Phòng AG-302"
+                    description: null
+                    areaM2: 28.0
+                    maxOccupants: 2
+                    floor: 3
+                    occupancyStatus: "VACANT"
+                    createdAt: "2026-10-30T10:15:30.000Z"
+                    pricing:
+                      monthlyRent: 4500000
+                      depositRequired: 4500000
+                      electricityRate: 3800
+                      waterRate: 25000
+                    images:
+                      - id: "11111111-2222-4333-8444-555555555555"
+                        imageUrl: "https://storage.rentmate.vn/rooms/ag-302-cover.jpg"
+                        sortOrder: 0
+                      - id: "22222222-3333-4444-8555-666666666666"
+                        imageUrl: "https://storage.rentmate.vn/rooms/ag-302-balcony.jpg"
+                        sortOrder: 1
+                      - id: "33333333-4444-4555-8666-777777777777"
+                        imageUrl: "https://storage.rentmate.vn/rooms/ag-302-bathroom.jpg"
+                        sortOrder: 2
+                    amenities:
+                      roomAmenities:
+                        - id: "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+                          name: "Máy lạnh Inverter"
+                        - id: "e2a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5d"
+                          name: "Ban công riêng"
+                      propertyAmenities:
+                        - id: "e4a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5f"
+                          name: "Thang máy"
+                        - id: "e5a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b60"
+                          name: "Khóa vân tay"
+                    serviceFees:
+                      - id: "d1c2b3a4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+                        feeName: "Phí quản lý & dịch vụ chung"
+                        monthlyAmount: 150000
+                        isRequired: true
+                      - id: "d2c2b3a4-5e6f-4a7b-8c9d-0e1f2a3b4c5e"
+                        feeName: "Gửi xe máy thứ 2"
+                        monthlyAmount: 100000
+                        isRequired: false
+                    property:
+                      id: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+                      name: "Khu trọ An Gia Building"
+                      address: "285/12 CMT8, Phường 12, Quận 10, TP.HCM"
+                      houseRules: "Giờ giấc tự do 24/7. Không nuôi chó lớn, cho phép mèo nhỏ giữ vệ sinh. Khóa cổng vân tay 2 lớp riêng."
+                      coverImageUrl: "https://storage.rentmate.vn/properties/an-gia-building.jpg"
+                      summary:
+                        totalRooms: 16
+                        vacantRooms: 3
+                    landlord:
+                      id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+                      fullName: "Nguyễn Văn An"
+                      isVerified: true
+        '400':
+          description: Mã định danh roomId trong URL path không đúng định dạng UUID v4.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                invalidUuid:
+                  summary: roomId không đúng chuẩn UUID v4
+                  value:
+                    success: false
+                    code: "INVALID_UUID"
+                    message: "Mã phòng không đúng định dạng UUID"
+                    errors:
+                      roomId:
+                        - "roomId phải là chuỗi UUID v4 hợp lệ"
+                    traceId: "a1c2e3f4-5b6d-4e8f-9a0b-1c2d3e4f5a6b"
+        '404':
+          description: Phòng không tồn tại hoặc không khả dụng công khai (bị ẩn, đã thuê, bảo trì, hoặc chủ trọ bị khóa).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                roomNotFound:
+                  summary: Phòng không tồn tại hoặc đã dừng cho thuê
+                  value:
+                    success: false
+                    code: "ROOM_NOT_FOUND"
+                    message: "Phòng trọ không tồn tại hoặc hiện không khả dụng công khai"
+                    traceId: "c3d4e5f6-a7b8-49c0-91e2-f3a4b5c6d7e8"
+        '500':
+          description: Lỗi máy chủ nội bộ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                serverError:
+                  summary: Lỗi hệ thống ngoài dự kiến
+                  value:
+                    success: false
+                    code: "INTERNAL_SERVER_ERROR"
+                    message: "Đã có sự cố xảy ra trên hệ thống. Vui lòng thử lại sau."
+                    traceId: "e5f6a7b8-9c0d-41e2-8f3a-4b5c6d7e8f9a"
+
+components:
+  schemas:
+    # ----------------------------------------------------
+    # RoomCardDTO (Thẻ phòng cho danh sách tìm kiếm)
+    # ----------------------------------------------------
+    RoomCardDTO:
+      type: object
+      description: Dữ liệu tóm tắt của một phòng trọ phục vụ hiển thị Room Card trên trang danh sách tìm kiếm và Homepage.
+      additionalProperties: false
+      required:
+        - roomId
+        - roomCode
+        - title
+        - monthlyRent
+        - areaM2
+        - maxOccupants
+        - occupancyStatus
+        - coverImageUrl
+        - address
+        - propertyId
+        - propertyName
+        - amenities
+      properties:
+        roomId:
+          type: string
+          format: uuid
+          description: Khóa định danh duy nhất của phòng (tương ứng trường `id` trong Prisma Model `Room`).
+          example: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+        roomCode:
+          type: string
+          description: Mã phòng do chủ trọ đặt (ví dụ A101, AG-302).
+          example: "AG-302"
+        title:
+          type: string
+          description: |
+            Tiêu đề hiển thị của phòng.
+            `[PROPOSED]` Sinh tự động từ Backend: `"${property.name} - Phòng ${roomCode}"`.
+          example: "Khu trọ An Gia Building - Phòng AG-302"
+        monthlyRent:
+          type: number
+          description: Giá thuê niêm yết hàng tháng (VND). Đã serialize từ kiểu Prisma Decimal sang number.
+          example: 4500000
+        areaM2:
+          type: number
+          description: Diện tích sàn sử dụng (m²). Đã serialize từ kiểu Prisma Decimal sang number.
+          example: 28.0
+        maxOccupants:
+          type: integer
+          description: Số lượng người ở tối đa theo quy định của phòng.
+          example: 2
+        occupancyStatus:
+          type: string
+          enum:
+            - VACANT
+          description: Trạng thái vận hành của phòng. Trong public discovery luôn là `VACANT` (hiển thị badge "Còn trống").
+          example: "VACANT"
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Đường dẫn ảnh đại diện của phòng (lấy theo thứ tự `sortOrder ASC, id ASC`). Trả về null nếu phòng chưa có ảnh.
+          example: "https://storage.rentmate.vn/rooms/ag-302-cover.jpg"
+        address:
+          type: string
+          description: Địa chỉ đầy đủ của tòa nhà/khu trọ (lấy từ `Property.address`).
+          example: "285/12 CMT8, Phường 12, Quận 10, TP.HCM"
+        propertyId:
+          type: string
+          format: uuid
+          description: Khóa định danh duy nhất của khu trọ.
+          example: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+        propertyName:
+          type: string
+          description: Tên khu trọ hoặc tòa nhà.
+          example: "Khu trọ An Gia Building"
+        amenities:
+          type: array
+          description: Danh sách tối đa 4 tiện ích tiêu biểu của phòng/khu trọ để gắn badge trên Card (ưu tiên tiện ích phòng trước, khu trọ sau).
+          maxItems: 4
+          items:
+            type: string
+          example:
+            - "Máy lạnh Inverter"
+            - "Ban công riêng"
+            - "Thang máy"
+
+    # ----------------------------------------------------
+    # PaginatedRoomResponse (Phản hồi phân trang SEARCH-01)
+    # ----------------------------------------------------
+    PaginatedRoomResponse:
+      type: object
+      description: Cấu trúc phân trang danh sách phòng trọ theo chuẩn Direct Payload của API Contract v2 hiện hành.
+      additionalProperties: false
+      required:
+        - items
+        - page
+        - pageSize
+        - totalItems
+        - totalPages
+      properties:
+        items:
+          type: array
+          description: Danh sách các phòng trọ thỏa mãn bộ lọc trên trang hiện tại.
+          items:
+            $ref: '#/components/schemas/RoomCardDTO'
+        page:
+          type: integer
+          description: Vị trí trang hiện tại (bắt đầu từ 1).
+          example: 1
+        pageSize:
+          type: integer
+          description: Số lượng phần tử tối đa trên mỗi trang.
+          example: 12
+        totalItems:
+          type: integer
+          description: Tổng số lượng phòng trọ công khai thỏa mãn bộ lọc.
+          example: 2
+        totalPages:
+          type: integer
+          description: |
+            Tổng số trang tính toán được (`Math.ceil(totalItems / pageSize)`).
+            `[PROPOSED]` Bổ sung để Frontend dễ dàng vẽ thanh phân trang mà không cần tự tính.
+          example: 1
+
+    # ----------------------------------------------------
+    # PublicRoomDetailDTO (Chi tiết phòng toàn diện SEARCH-02)
+    # ----------------------------------------------------
+    PublicRoomDetailDTO:
+      type: object
+      description: Dữ liệu chi tiết toàn diện của một căn phòng trọ công khai phục vụ hiển thị màn hình Room Detail.
+      additionalProperties: false
+      required:
+        - roomId
+        - roomCode
+        - title
+        - description
+        - areaM2
+        - maxOccupants
+        - floor
+        - occupancyStatus
+        - createdAt
+        - pricing
+        - images
+        - amenities
+        - serviceFees
+        - property
+        - landlord
+      properties:
+        roomId:
+          type: string
+          format: uuid
+          description: Khóa định danh UUID duy nhất của phòng.
+          example: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+        roomCode:
+          type: string
+          description: Mã phòng do chủ trọ niêm yết.
+          example: "AG-302"
+        title:
+          type: string
+          description: |
+            Tiêu đề hiển thị của phòng.
+            `[PROPOSED]` Sinh tự động từ Backend: `"${property.name} - Phòng ${roomCode}"`.
+          example: "Khu trọ An Gia Building - Phòng AG-302"
+        description:
+          type:
+            - string
+            - "null"
+          description: |
+            Mô tả chi tiết phòng trọ.
+            `[PROPOSED]` Luôn trả về `null` trong Phase 1 do Prisma Schema `Room` hiện chưa có cột lưu trữ mô tả riêng. Tuyệt đối không gộp `houseRules` vào trường này.
+          example: null
+        areaM2:
+          type: number
+          description: Diện tích phòng tính theo mét vuông (m²).
+          example: 28.0
+        maxOccupants:
+          type: integer
+          description: Số lượng người ở tối đa theo quy định.
+          example: 2
+        floor:
+          type:
+            - integer
+            - "null"
+          description: Vị trí tầng của phòng trong tòa nhà (trả về null nếu không cấu hình).
+          example: 3
+        occupancyStatus:
+          type: string
+          enum:
+            - VACANT
+          description: Trạng thái phòng ("Còn trống").
+          example: "VACANT"
+        createdAt:
+          type: string
+          format: date-time
+          description: Thời điểm phòng được tạo trên hệ thống (chuẩn ISO 8601).
+          example: "2026-10-30T10:15:30.000Z"
+        pricing:
+          $ref: '#/components/schemas/RoomPricingDTO'
+        images:
+          type: array
+          description: Danh mục hình ảnh thực tế của căn phòng, được sắp xếp theo thứ tự `sortOrder ASC, id ASC`.
+          items:
+            $ref: '#/components/schemas/RoomImageDTO'
+        amenities:
+          type: object
+          description: Phân tách rõ ràng giữa tiện ích riêng của phòng và tiện ích chung của tòa nhà.
+          additionalProperties: false
+          required:
+            - roomAmenities
+            - propertyAmenities
+          properties:
+            roomAmenities:
+              type: array
+              description: Các tiện ích gắn trực tiếp với phòng (máy lạnh, giường đệm, ban công riêng...).
+              items:
+                $ref: '#/components/schemas/AmenityItemDTO'
+            propertyAmenities:
+              type: array
+              description: Các tiện ích chung của tòa nhà (thang máy, bảo vệ 24/7, hầm để xe, camera...).
+              items:
+                $ref: '#/components/schemas/AmenityItemDTO'
+        serviceFees:
+          type: array
+          description: Danh mục các khoản phí dịch vụ hàng tháng phát sinh (phí quản lý, gửi xe máy...).
+          items:
+            $ref: '#/components/schemas/RoomServiceFeeDTO'
+        property:
+          $ref: '#/components/schemas/PropertyInDetailDTO'
+        landlord:
+          $ref: '#/components/schemas/LandlordPublicDTO'
+
+    # ----------------------------------------------------
+    # Các Sub-Schemas Hỗ Trợ
+    # ----------------------------------------------------
+    RoomPricingDTO:
+      type: object
+      description: Bảng chi phí thuê phòng và định mức sinh hoạt hàng tháng.
+      additionalProperties: false
+      required:
+        - monthlyRent
+        - depositRequired
+        - electricityRate
+        - waterRate
+      properties:
+        monthlyRent:
+          type: number
+          description: Tiền thuê phòng hàng tháng (VND).
+          example: 4500000
+        depositRequired:
+          type: number
+          description: Tiền đặt cọc giữ chỗ/hợp đồng theo quy định (VND).
+          example: 4500000
+        electricityRate:
+          type: number
+          description: Đơn giá điện sinh hoạt (VND/kWh) tính theo chỉ số công tơ riêng.
+          example: 3800
+        waterRate:
+          type: number
+          description: Đơn giá nước sinh hoạt (VND/m³) tính theo đồng hồ nước riêng.
+          example: 25000
+
+    RoomImageDTO:
+      type: object
+      description: Thông tin một tệp hình ảnh của phòng trọ.
+      additionalProperties: false
+      required:
+        - id
+        - imageUrl
+        - sortOrder
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Khóa định danh duy nhất của bản ghi hình ảnh.
+          example: "11111111-2222-4333-8444-555555555555"
+        imageUrl:
+          type: string
+          format: uri
+          description: Đường dẫn truy cập tệp hình ảnh trên CDN/Storage.
+          example: "https://storage.rentmate.vn/rooms/ag-302-cover.jpg"
+        sortOrder:
+          type: integer
+          description: Thứ tự hiển thị (số nhỏ hơn được ưu tiên hiển thị trước).
+          example: 0
+
+    AmenityItemDTO:
+      type: object
+      description: Thông tin định danh và tên tiện ích.
+      additionalProperties: false
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Khóa định danh UUID của tiện ích.
+          example: "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+        name:
+          type: string
+          description: Tên tiện ích (ví dụ Máy lạnh Inverter, Thang máy...).
+          example: "Máy lạnh Inverter"
+
+    RoomServiceFeeDTO:
+      type: object
+      description: Khoản phí dịch vụ hàng tháng của phòng trọ.
+      additionalProperties: false
+      required:
+        - id
+        - feeName
+        - monthlyAmount
+        - isRequired
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Khóa định danh UUID của khoản phí dịch vụ.
+          example: "d1c2b3a4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+        feeName:
+          type: string
+          description: Tên khoản phí dịch vụ (ví dụ Phí quản lý chung, Gửi xe máy...).
+          example: "Phí quản lý & dịch vụ chung"
+        monthlyAmount:
+          type: number
+          description: Số tiền định mức hàng tháng (VND).
+          example: 150000
+        isRequired:
+          type: boolean
+          description: Khoản phí là bắt buộc hay tùy chọn theo nhu cầu sử dụng của người thuê.
+          example: true
+
+    PropertySummaryDTO:
+      type: object
+      description: |
+        Thống kê tổng quan số lượng phòng của khu trọ.
+        `[PROPOSED / NEEDS_DECISION]` Định nghĩa rõ ranh giới:
+        - `totalRooms`: Tổng số phòng vật lý chưa xóa mềm (`isArchived: false`).
+        - `vacantRooms`: Tổng số phòng đang trống và công khai (`VACANT` + `VISIBLE` + `not archived`).
+      additionalProperties: false
+      required:
+        - totalRooms
+        - vacantRooms
+      properties:
+        totalRooms:
+          type: integer
+          description: Tổng số lượng phòng vật lý đang được tòa nhà khai thác.
+          example: 16
+        vacantRooms:
+          type: integer
+          description: Số lượng phòng hiện đang trống và sẵn sàng nhận người thuê.
+          example: 3
+
+    PropertyInDetailDTO:
+      type: object
+      description: Thông tin khu trọ/tòa nhà bao quanh căn phòng (đã loại bỏ trùng lặp tiện ích).
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - address
+        - houseRules
+        - coverImageUrl
+        - summary
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Khóa định danh UUID của khu trọ.
+          example: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+        name:
+          type: string
+          description: Tên gọi của tòa nhà hoặc khu nhà trọ.
+          example: "Khu trọ An Gia Building"
+        address:
+          type: string
+          description: Địa chỉ thực tế chi tiết của khu trọ.
+          example: "285/12 CMT8, Phường 12, Quận 10, TP.HCM"
+        houseRules:
+          type:
+            - string
+            - "null"
+          description: Nội quy nhà trọ, quy định giờ giấc ra vào, tiếp khách, nuôi thú cưng (lấy từ `Property.houseRules`).
+          example: "Giờ giấc tự do 24/7. Không nuôi chó lớn, cho phép mèo nhỏ giữ vệ sinh. Khóa cổng vân tay 2 lớp riêng."
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Đường dẫn ảnh chụp ngoại thất tổng quan của tòa nhà.
+          example: "https://storage.rentmate.vn/properties/an-gia-building.jpg"
+        summary:
+          $ref: '#/components/schemas/PropertySummaryDTO'
+
+    LandlordPublicDTO:
+      type: object
+      description: |
+        Hồ sơ công khai an toàn của chủ trọ/người quản lý.
+        Tuyệt đối không để lộ số điện thoại, email, mật khẩu hoặc số CCCD.
+
+        **Lưu ý bắt buộc cho BE-04:**
+        Thuộc tính `additionalProperties: false` được thiết lập nhằm ngăn chặn tuyệt đối các trường lạ ở tầng Contract. Khi triển khai BE-04, Backend BẮT BUỘC phải dùng Prisma `select` allowlist (chỉ select đúng `id` và `fullName`), không phụ thuộc duy nhất vào serialization layer để ngăn rò rỉ dữ liệu nhạy cảm từ database.
+      additionalProperties: false
+      required:
+        - id
+        - fullName
+        - isVerified
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Khóa định danh UUID của chủ trọ (dùng làm đích đến cho API nhắn tin nội bộ UC-27).
+          example: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        fullName:
+          type: string
+          description: Họ và tên hiển thị công khai của chủ trọ.
+          example: "Nguyễn Văn An"
+        isVerified:
+          type: boolean
+          description: Cờ xác thực danh tính chủ trọ (true nếu đã được Quản trị viên duyệt hồ sơ chứng nhận).
+          example: true
+
+    # ----------------------------------------------------
+    # Chuẩn Phản Hồi Lỗi (ApiErrorResponse - API Contract v2)
+    # ----------------------------------------------------
+    ApiErrorResponse:
+      type: object
+      description: Cấu trúc phản hồi lỗi chuẩn hóa áp dụng thống nhất cho toàn bộ hệ thống RentMate.
+      additionalProperties: false
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          enum:
+            - false
+          description: Luôn luôn bằng false khi xảy ra lỗi.
+          example: false
+        code:
+          type: string
+          description: Mã định danh lỗi nghiệp vụ (ví dụ VALIDATION_ERROR, ROOM_NOT_FOUND, INVALID_UUID).
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          description: Thông điệp thông báo lỗi tổng quan bằng tiếng Việt.
+          example: "Dữ liệu tìm kiếm không hợp lệ"
+        errors:
+          type: object
+          description: Chi tiết danh sách thông điệp lỗi ánh xạ theo tên từng trường vi phạm.
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            maxPrice:
+              - "maxPrice không được nhỏ hơn minPrice"
+        traceId:
+          type: string
+          description: Mã định danh vết phục vụ tra cứu log kỹ thuật trên hệ thống.
+          example: "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d"
