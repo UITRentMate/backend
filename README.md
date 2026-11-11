@@ -12,8 +12,8 @@ Hệ thống quản lý và cho thuê phòng trọ thông minh — Phân hệ D�
 - **Đơn vị:** Trường Đại học Công nghệ Thông tin (UIT) — ĐHQG TP.HCM
 - **Nhóm thực hiện:** Nhóm 15 (5 thành viên: 3 Frontend, 2 Backend)
 - **Thời hạn dự kiến hoàn thành đồ án:** 27/12/2026
-- **Trạng thái hiện tại:** Đã hoàn thành giai đoạn Base Project, tích hợp thành công CSDL PostgreSQL với Prisma ORM, và áp dụng Initial Migration (32 bảng nghiệp vụ). Chuẩn bị bước vào Phase 1 phát triển nghiệp vụ. Chưa triển khai các endpoint nghiệp vụ cụ thể.
-- **Tình trạng API Contract:** Hiện đang trong quá trình xây dựng và thống nhất giữa đội Frontend và Backend (chưa chốt chính thức).
+- **Trạng thái hiện tại:** Nhánh `feat/auth` đã bổ sung API đăng ký, đăng nhập, làm mới token, đăng xuất và xem tài khoản cùng migration bảng phiên refresh. Cần áp dụng migration trên PostgreSQL và FE 1 review contract trước khi tích hợp.
+- **Tình trạng API Contract:** Authentication/User đang chờ FE 1 xác nhận; xem [đề xuất cho issue #7](docs/issues/7-auth-user-endpoint-proposal.md).
 
 ---
 
@@ -29,6 +29,7 @@ Mã nguồn Backend được xây dựng dựa trên các công nghệ thực t�
 | **ORM / Data Access** | [Prisma ORM](https://www.prisma.io/) | `6.19.3` | Quản lý schema, migrations và truy vấn dữ liệu |
 | **Cơ sở dữ liệu** | [PostgreSQL](https://www.postgresql.org/) | `18.x` (hỗ trợ 16 - 18) | CSDL quan hệ lưu trữ chính (`rentmate_dev`) |
 | **Dev Execution** | [tsx](https://github.com/privatenumber/tsx) | `^4.23.15` | Trình chạy TypeScript tức thì với tính năng file watcher |
+| **Xác thực** | bcrypt, jsonwebtoken | Xem `package-lock.json` | Băm mật khẩu, ký JWT access token |
 
 ---
 
@@ -73,7 +74,10 @@ npm ci
    ```env
    PORT=5000
    DATABASE_URL="postgresql://postgres:mat_khau_cua_ban@localhost:5432/rentmate_dev?schema=public"
+   JWT_SECRET="REPLACE_ME"
+   CORS_ORIGINS="http://localhost:3000,http://localhost:5173"
    ```
+   Thay `REPLACE_ME` bằng chuỗi ngẫu nhiên bí mật dài ít nhất 32 ký tự trước khi chạy API xác thực. Cập nhật `CORS_ORIGINS` theo origin chính xác của Frontend, phân cách nhiều origin bằng dấu phẩy.
 3. Mở pgAdmin 4 hoặc `psql`, tạo một database trống tên là **`rentmate_dev`**:
    ```sql
    CREATE DATABASE rentmate_dev;
@@ -99,6 +103,8 @@ npx prisma migrate deploy
 > - Sử dụng lệnh **`npx prisma migrate deploy`** để áp dụng migration đã qua kiểm duyệt một cách an toàn.
 > - **Tuyệt đối KHÔNG** chạy các lệnh phá hủy như `npx prisma db push` hoặc `npx prisma migrate reset`.
 > - Không tự ý sửa đổi file [prisma/schema.prisma](prisma/schema.prisma) hoặc tạo migration mới khi chưa có kế hoạch được phê duyệt.
+
+Nhánh `feat/auth` bổ sung migration `20261105000000_refresh_sessions` cho refresh token. Dùng `migrate deploy` sau khi tạo database để áp dụng cả initial migration và migration này.
 
 ### Bước 5: Kiểm tra kết nối CSDL
 Kiểm tra kết nối an toàn từ Backend tới cơ sở dữ liệu `rentmate_dev` (truy vấn `SELECT 1`, không đổi dữ liệu):
@@ -126,6 +132,7 @@ Các lệnh phát triển được định nghĩa trong [package.json](package.j
 | **Biên dịch Production (Build)** | `npm run build` | Chạy trình biên dịch TypeScript (`tsc`) để xuất mã nguồn JavaScript sang thư mục `dist/`. |
 | **Chạy Production Server** | `npm start` | Chạy máy chủ từ mã nguồn đã biên dịch tại `dist/server.js`. |
 | **Kiểm tra kết nối Database** | `npm run db:check` | Thực thi truy vấn `SELECT 1` bằng Prisma Client để xác minh trạng thái kết nối tới PostgreSQL. |
+| **Kiểm thử API** | `npm test` | Chạy test cho các luồng xác thực và lỗi quan trọng. |
 
 ---
 
@@ -146,7 +153,21 @@ Hệ thống cung cấp sẵn một endpoint kiểm tra trạng thái hoạt đ�
 
 ---
 
-## 7. Cấu trúc thư mục mã nguồn
+## 7. Authentication & User API trên `feat/auth`
+
+| Method | Endpoint | Chức năng |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/auth/register` | Tạo tài khoản `TENANT`/`ACTIVE`. |
+| `POST` | `/api/v1/auth/login` | Đăng nhập bằng email hoặc số điện thoại; JSON trả JWT access token hạn 1 giờ. |
+| `POST` | `/api/v1/auth/refresh` | Dùng refresh token trong HttpOnly Cookie để xoay vòng token và cấp JWT mới. |
+| `POST` | `/api/v1/auth/logout` | Thu hồi refresh session hiện tại và xóa cookie. |
+| `GET` | `/api/v1/users/me` | Xem tài khoản hiện tại với `Authorization: Bearer <accessToken>`. |
+
+Refresh token chỉ nằm trong HttpOnly Cookie và được lưu dạng hash trong PostgreSQL. Phiên hết hạn sau 7 ngày tính từ lần đăng nhập; refresh không kéo dài hạn này. Access token đã cấp vẫn có hiệu lực tới khi hết hạn, tối đa 1 giờ sau logout. Backend chỉ trả CORS headers cho origin có trong `CORS_ORIGINS` và cho phép credentials; các request Frontend cần gửi/nhận cookie (login, refresh, logout) phải dùng `credentials: 'include'`. Cookie dùng `SameSite=Lax`, nên Frontend và Backend cần cùng site (ví dụ hai cổng localhost khi phát triển).
+
+---
+
+## 8. Cấu trúc thư mục mã nguồn
 
 Backend áp dụng kiến trúc **Modular Monolith kết hợp Lightweight Layered Architecture**:
 
@@ -174,7 +195,7 @@ backend/
 
 ---
 
-## 8. Quy tắc đóng góp & Hướng dẫn dành cho AI Agents
+## 9. Quy tắc đóng góp & Hướng dẫn dành cho AI Agents
 
 - Hướng dẫn quy trình làm việc nhóm, phân chia nhánh, mở Pull Request và checklist review: xem tại [CONTRIBUTING.md](CONTRIBUTING.md).
 - Hướng dẫn và quy tắc an toàn dành cho AI Coding Assistants (Antigravity, Cursor, Copilot...): xem tại [AGENTS.md](AGENTS.md).
