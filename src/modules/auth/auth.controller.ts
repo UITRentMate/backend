@@ -1,5 +1,5 @@
 import type { Request, Response } from 'express';
-import { HttpError } from '../../common/http-error';
+import { ApiError } from '../../common/errors/api-error';
 import { login, logout, refreshSession, register } from './auth.service';
 import { readRefreshCookie, REFRESH_COOKIE, refreshCookieOptions } from './auth.security';
 import { parseLogin, parseRegister } from './auth.validation';
@@ -27,7 +27,7 @@ export async function refreshController(req: Request, res: Response) {
     res.cookie(REFRESH_COOKIE, result.refreshToken, refreshCookieOptions(result.maxAge));
     res.status(200).json(result.body);
   } catch (error) {
-    if (error instanceof HttpError && (error.status === 401 || error.status === 403)) {
+    if (error instanceof ApiError && (error.statusCode === 401 || error.statusCode === 403)) {
       res.cookie(REFRESH_COOKIE, '', refreshCookieOptions(0));
     }
     throw error;

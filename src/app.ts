@@ -1,9 +1,39 @@
 import express, { type Request, type Response } from 'express';
-import { errorHandler } from './common/http-error';
+import { errorHandler } from './common/middleware/error-handler';
 import { authRoutes } from './modules/auth/auth.routes';
 import { usersRoutes } from './modules/users/users.routes';
 
 export const app = express();
+
+app.use((req, res, next) => {
+  const origin = req.header('Origin');
+  if (origin) {
+    res.vary('Origin');
+    const allowedOrigins = new Set(
+      (process.env.CORS_ORIGINS ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+
+    if (allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+
+      if (req.header('Access-Control-Request-Private-Network') === 'true') {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
+    }
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+  next();
+});
 
 app.use(express.json());
 app.use('/api/v1/auth', authRoutes);

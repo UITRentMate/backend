@@ -1,4 +1,4 @@
-import { HttpError } from '../../common/http-error';
+import { ApiError } from '../../common/errors/api-error';
 import { prisma } from '../../infrastructure/database/prisma';
 
 export async function getCurrentUser(userId: string) {
@@ -6,8 +6,8 @@ export async function getCurrentUser(userId: string) {
     where: { id: userId },
     select: { id: true, fullName: true, email: true, phone: true, role: true, accountStatus: true },
   });
-  if (!user) throw new HttpError(404, 'USER_NOT_FOUND', 'Không tìm thấy tài khoản');
-  if (user.accountStatus !== 'ACTIVE') throw new HttpError(403, 'ACCOUNT_LOCKED', 'Tài khoản không thể truy cập');
+  if (!user) throw new ApiError(404, 'USER_NOT_FOUND', 'Không tìm thấy tài khoản');
+  if (user.accountStatus !== 'ACTIVE') throw new ApiError(403, 'ACCOUNT_LOCKED', 'Tài khoản không thể truy cập');
   return {
     userId: user.id,
     fullName: user.fullName,

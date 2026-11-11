@@ -1,6 +1,6 @@
 import bcrypt from 'bcrypt';
 import { Prisma } from '@prisma/client';
-import { HttpError } from '../../common/http-error';
+import { ApiError } from '../../common/errors/api-error';
 import { prisma } from '../../infrastructure/database/prisma';
 import { ACCESS_TTL_SECONDS, assertJwtConfigured, hashRefreshToken, newRefreshToken, REFRESH_TTL_SECONDS, signAccessToken } from './auth.security';
 import type { parseLogin, parseRegister } from './auth.validation';
@@ -36,22 +36,23 @@ export async function register(input: ReturnType<typeof parseRegister>) {
     if (error && typeof error === 'object' && 'code' in error && error.code === 'P2002') {
       const target = 'meta' in error && error.meta && typeof error.meta === 'object' && 'target' in error.meta ? error.meta.target : undefined;
       const fields = Array.isArray(target) ? target : [target];
-      if (fields.some((field) => String(field).includes('email'))) throw new HttpError(409, 'EMAIL_ALREADY_EXISTS', 'Email đã được sử dụng');
-      if (fields.some((field) => String(field).includes('phone'))) throw new HttpError(409, 'PHONE_ALREADY_EXISTS', 'Số điện thoại đã được sử dụng');
-      throw new HttpError(409, 'ACCOUNT_ALREADY_EXISTS', 'Tài khoản đã tồn tại');
+      if (fields.some((field) => String(field).includes('email'))) throw new ApiError(409, 'EMAIL_ALREADY_EXISTS', 'Email đã được sử dụng');
+      if (fields.some((field) => String(field).includes('phone'))) throw new ApiError(409, 'PHONE_ALREADY_EXISTS', 'Số điện thoại đã được sử dụng');
+      throw new ApiError(409, 'ACCOUNT_ALREADY_EXISTS', 'Tài khoản đã tồn tại');
     }
     throw error;
   }
 }
 
 export async function login(input: ReturnType<typeof parseLogin>) {
+  assertJwtConfigured();
   const user = await prisma.user.findFirst({
     where: { OR: [{ email: input.username }, { phone: input.username }] },
   });
   if (!user || !(await bcrypt.compare(input.password, user.passwordHash))) {
-    throw new HttpError(401, 'INVALID_CREDENTIALS', 'Thông tin đăng nhập không đúng');
+    throw new ApiError(401, 'INVALID_CREDENTIALS', 'Thông tin đăng nhập không đúng');
   }
-  if (user.accountStatus !== 'ACTIVE') throw new HttpError(403, 'ACCOUNT_LOCKED', 'Tài khoản không thể đăng nhập');
+  if (user.accountStatus !== 'ACTIVE') throw new ApiError(403, 'ACCOUNT_LOCKED', 'Tài khoản không thể đăng nhập');
   const accessToken = signAccessToken(user.id);
   const refresh = newRefreshToken();
   await prisma.refreshSession.create({
@@ -112,8 +113,8 @@ export async function refreshSession(token: string) {
     });
     return { status: 'ok' as const, userId: current.userId, expiresAt: current.expiresAt };
   });
-  if (result.status === 'locked') throw new HttpError(403, 'ACCOUNT_LOCKED', 'Tài khoản không thể đăng nhập');
-  if (result.status !== 'ok') throw new HttpError(401, 'UNAUTHORIZED', 'Refresh token không hợp lệ');
+  if (result.status === 'locked') throw new ApiError(403, 'ACCOUNT_LOCKED', 'Tài khoản không thể đăng nhập');
+  if (result.status !== 'ok') throw new ApiError(401, 'UNAUTHORIZED', 'Refresh token không hợp lệ');
   return {
     body: { accessToken: signAccessToken(result.userId), expiresIn: ACCESS_TTL_SECONDS },
     refreshToken: next.token,

@@ -75,8 +75,9 @@ npm ci
    PORT=5000
    DATABASE_URL="postgresql://postgres:mat_khau_cua_ban@localhost:5432/rentmate_dev?schema=public"
    JWT_SECRET="REPLACE_ME"
+   CORS_ORIGINS="http://localhost:3000,http://localhost:5173"
    ```
-   Thay `REPLACE_ME` bằng chuỗi ngẫu nhiên bí mật dài ít nhất 32 ký tự trước khi chạy API xác thực.
+   Thay `REPLACE_ME` bằng chuỗi ngẫu nhiên bí mật dài ít nhất 32 ký tự trước khi chạy API xác thực. Cập nhật `CORS_ORIGINS` theo origin chính xác của Frontend, phân cách nhiều origin bằng dấu phẩy.
 3. Mở pgAdmin 4 hoặc `psql`, tạo một database trống tên là **`rentmate_dev`**:
    ```sql
    CREATE DATABASE rentmate_dev;
@@ -162,7 +163,7 @@ Hệ thống cung cấp sẵn một endpoint kiểm tra trạng thái hoạt đ�
 | `POST` | `/api/v1/auth/logout` | Thu hồi refresh session hiện tại và xóa cookie. |
 | `GET` | `/api/v1/users/me` | Xem tài khoản hiện tại với `Authorization: Bearer <accessToken>`. |
 
-Refresh token chỉ nằm trong HttpOnly Cookie và được lưu dạng hash trong PostgreSQL. Phiên hết hạn sau 7 ngày tính từ lần đăng nhập; refresh không kéo dài hạn này. Access token đã cấp vẫn có hiệu lực tới khi hết hạn, tối đa 1 giờ sau logout. Browser phải gửi cookie khi gọi refresh/logout; chính sách origin/CORS cần được thống nhất khi tích hợp Frontend.
+Refresh token chỉ nằm trong HttpOnly Cookie và được lưu dạng hash trong PostgreSQL. Phiên hết hạn sau 7 ngày tính từ lần đăng nhập; refresh không kéo dài hạn này. Access token đã cấp vẫn có hiệu lực tới khi hết hạn, tối đa 1 giờ sau logout. Backend chỉ trả CORS headers cho origin có trong `CORS_ORIGINS` và cho phép credentials; các request Frontend cần gửi/nhận cookie (login, refresh, logout) phải dùng `credentials: 'include'`. Cookie dùng `SameSite=Lax`, nên Frontend và Backend cần cùng site (ví dụ hai cổng localhost khi phát triển).
 
 ---
 

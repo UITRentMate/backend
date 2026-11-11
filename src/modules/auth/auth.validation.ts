@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { HttpError } from '../../common/http-error';
+import { ApiError } from '../../common/errors/api-error';
 
 const passwordSchema = z.string()
   .min(8, 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
@@ -35,7 +35,7 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
     const field = issue.path.join('.') || '_';
     (errors[field] ??= []).push(issue.message);
   }
-  throw new HttpError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', errors);
+  throw new ApiError(400, 'VALIDATION_ERROR', 'Dữ liệu không hợp lệ', errors);
 }
 
 export function parseRegister(body: unknown) {

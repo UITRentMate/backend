@@ -142,7 +142,7 @@ Cookie đề xuất có `HttpOnly`, `Path=/api/v1/auth`, hạn tối đa 7 ngày
 
 ## 4. Lỗi và quyết định còn mở
 
-Đề xuất lỗi JSON `{ "success": false, "code": "...", "message": "...", "errors": { "field": ["..."] } }`; `errors` chỉ có khi validation. Dùng `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_CREDENTIALS`, `403 ACCOUNT_LOCKED`, `409 EMAIL_ALREADY_EXISTS`/`PHONE_ALREADY_EXISTS`/`APPLICATION_ALREADY_PENDING`, và `500 INTERNAL_ERROR`. Cần chốt có bắt buộc `traceId` như Phụ lục A của tài liệu tổng thể không.
+Lỗi JSON gồm `success: false`, `code`, `message` và `traceId`; `errors` chỉ có khi validation. Dùng `400 VALIDATION_ERROR`, `401 UNAUTHORIZED`/`INVALID_CREDENTIALS`, `403 ACCOUNT_LOCKED`, `409 EMAIL_ALREADY_EXISTS`/`PHONE_ALREADY_EXISTS`/`APPLICATION_ALREADY_PENDING`, và `500 INTERNAL_ERROR`.
 
 - FE 1 xác nhận request/response, việc bỏ `tokenType`/`rememberMe` và payload hồ sơ Chủ trọ.
 - Backend duyệt model phiên/migration, chính sách cookie và cách thu hồi refresh token; access token vẫn sống tới hết hạn 1 giờ sau logout.

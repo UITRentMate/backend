@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import jwt from 'jsonwebtoken';
-import { HttpError } from '../../common/http-error';
+import { ApiError } from '../../common/errors/api-error';
 
 export const ACCESS_TTL_SECONDS = 60 * 60;
 export const REFRESH_TTL_SECONDS = 7 * 24 * 60 * 60;
@@ -36,7 +36,7 @@ export function verifyAccessToken(token: string): string {
     if (typeof claims === 'string' || typeof claims.sub !== 'string') throw new Error('Missing subject');
     return claims.sub;
   } catch {
-    throw new HttpError(401, 'UNAUTHORIZED', 'Thông tin xác thực không hợp lệ');
+    throw new ApiError(401, 'UNAUTHORIZED', 'Thông tin xác thực không hợp lệ');
   }
 }
 

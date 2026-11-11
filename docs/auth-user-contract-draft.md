@@ -17,7 +17,7 @@ Phạm vi đề xuất hiện gồm `POST /api/v1/auth/register`, `POST /api/v1/
 
 - Request và response dùng JSON. `GET /users/me` yêu cầu `Authorization: Bearer <accessToken>`. Refresh token đặt trong HttpOnly Cookie, không trả trong JSON và không gửi trong Authorization header.
 - ID trả về là UUID của `User.id`; các mã `USR001` trong tài liệu tổng thể chỉ là ví dụ.
-- **Đề xuất cần xác nhận:** lỗi có dạng `{ "success": false, "code": "...", "message": "...", "errors": { "field": ["..."] } }`. `errors` chỉ xuất hiện khi lỗi validation. Phụ lục A của tài liệu tổng thể còn minh họa `traceId`; cần chốt có bắt buộc hay không. Không đưa thông tin nội bộ, mật khẩu, hash hoặc signing secret vào response.
+- Lỗi có dạng `{ "success": false, "code": "...", "message": "...", "errors": { "field": ["..."] }, "traceId": "..." }`. `errors` chỉ xuất hiện khi lỗi validation; `traceId` luôn có để đối chiếu lỗi với log. Không đưa thông tin nội bộ, mật khẩu, hash hoặc signing secret vào response.
 - Tài khoản đăng ký mặc định có `role: "TENANT"`, `status: "ACTIVE"`. Đăng ký vai trò `LANDLORD` không nằm trong endpoint này; việc nâng vai trò dùng API riêng `POST /api/v1/landlord-verifications` và chỉ diễn ra sau khi Admin duyệt hồ sơ.
 
 ## AUTH-01 — Đăng ký
