@@ -137,6 +137,17 @@ test('me rejects a token after its account has been locked', async () => {
   });
   assert.equal(response.status, 403);
   assert.equal(body.code, 'ACCOUNT_LOCKED');
+  assert.equal(body.message, 'Tài khoản đã bị khóa hoặc chưa kích hoạt');
+});
+
+test('me rejects a token when user is deleted or missing from database', async () => {
+  stub(prisma.user, 'findUnique', async () => null);
+  const { response, body } = await request('/api/v1/users/me', {
+    headers: { Authorization: `Bearer ${signAccessToken(user.id)}` },
+  });
+  assert.equal(response.status, 401);
+  assert.equal(body.code, 'UNAUTHORIZED');
+  assert.equal(body.message, 'Tài khoản không tồn tại hoặc phiên đăng nhập không hợp lệ');
 });
 
 test('login returns a one-hour JWT and sets a seven-day HttpOnly refresh cookie', async () => {
