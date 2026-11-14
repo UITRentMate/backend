@@ -54,7 +54,6 @@ export function mapToLandlordPropertyDetail(
   return {
     ...mapToLandlordPropertyCard(property, stats),
     rooms,
-    updatedAt: property.updatedAt ?? property.createdAt,
   };
 }
 

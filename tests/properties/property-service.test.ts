@@ -207,6 +207,52 @@ test('archiveProperty rejects with 409 CONFLICT if property has RENTED or HELD r
   );
 });
 
+test('archiveProperty rejects with 409 CONFLICT if property has active contracts in DB', async () => {
+  stub(PropertyRepository, 'findPropertyById', async () => ({
+    ...sampleProperty,
+    rooms: [
+      {
+        id: 'room-vacant',
+        occupancyStatus: 'VACANT',
+        isArchived: false,
+      },
+    ],
+  }));
+  stub(PropertyRepository, 'countActiveContracts', async () => 1);
+
+  await assert.rejects(
+    () => PropertyService.archiveProperty(mockLandlordId, mockPropertyId),
+    (err: any) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.statusCode, 409);
+      assert.equal(err.code, 'CONFLICT');
+      assert.equal(err.message, 'Không thể lưu trữ khu trọ khi vẫn còn hợp đồng thuê đang có hiệu lực');
+      return true;
+    },
+  );
+});
+
+test('archiveProperty succeeds when no active rooms and no active contracts', async () => {
+  let archived = false;
+  stub(PropertyRepository, 'findPropertyById', async () => ({
+    ...sampleProperty,
+    rooms: [
+      {
+        id: 'room-vacant',
+        occupancyStatus: 'VACANT',
+        isArchived: false,
+      },
+    ],
+  }));
+  stub(PropertyRepository, 'countActiveContracts', async () => 0);
+  stub(PropertyRepository, 'archiveProperty', async () => {
+    archived = true;
+  });
+
+  await PropertyService.archiveProperty(mockLandlordId, mockPropertyId);
+  assert.equal(archived, true);
+});
+
 test('updateProperty succeeds when caller is owner and amenities are valid', async () => {
   stub(PropertyRepository, 'findPropertyById', async () => sampleProperty);
   stub(PropertyRepository, 'validateAmenityIds', async () => true);

@@ -38,7 +38,6 @@ export interface LandlordPropertyCardDTO {
 
 export interface LandlordPropertyDetailDTO extends LandlordPropertyCardDTO {
   rooms: LandlordRoomItemDTO[];
-  updatedAt: Date;
 }
 
 export interface PublicLandlordProfileDTO {

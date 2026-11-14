@@ -200,6 +200,7 @@ test('GET /api/v1/properties/:id returns 404 when property has only hidden rooms
 test('PATCH /api/v1/landlord/properties/:id/archive archives property when no active contracts', async () => {
   stub(prisma.user, 'findUnique', async () => mockLandlord);
   stub(prisma.property, 'findUnique', async () => samplePropertyData);
+  stub(prisma.contract, 'count', async () => 0);
   stub(prisma.property, 'update', async () => ({ ...samplePropertyData, status: 'ARCHIVED' }));
 
   const { response, body } = await request(`/api/v1/landlord/properties/${mockPropertyId}/archive`, {

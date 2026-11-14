@@ -453,7 +453,6 @@ components:
         - amenities
         - rooms
         - createdAt
-        - updatedAt
       properties:
         id:
           type: string
@@ -483,9 +482,6 @@ components:
           items:
             $ref: '#/components/schemas/LandlordRoomItemDTO'
         createdAt:
-          type: string
-          format: date-time
-        updatedAt:
           type: string
           format: date-time
 

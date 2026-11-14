@@ -14,7 +14,6 @@ const mockPrismaProperty = {
   coverImageUrl: 'https://images.unsplash.com/cover',
   status: 'ACTIVE',
   createdAt: new Date('2026-01-01T00:00:00Z'),
-  updatedAt: new Date('2026-01-02T00:00:00Z'),
   landlord: {
     id: 'landlord-uuid-1',
     fullName: 'Trần Văn Chủ',
@@ -84,6 +83,7 @@ test('mapToLandlordPropertyDetail includes all rooms including maintenance/hidde
   assert.equal(detail.rooms[0].roomCode, 'P101');
   assert.equal(detail.rooms[1].roomCode, 'P102');
   assert.equal(detail.rooms[1].occupancyStatus, 'MAINTENANCE');
+  assert.equal('updatedAt' in detail, false);
 });
 
 test('mapToPublicPropertyDetail shields landlord private info and maps public rooms only', () => {

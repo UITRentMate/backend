@@ -15,7 +15,7 @@ function stub(delegate: any, name: string, implementation: (...args: any[]) => a
 }
 
 test('requireRole rejects when res.locals.userId is missing', async () => {
-  const req = {} as Request;
+  const req = { header: () => undefined } as unknown as Request;
   const res = { locals: {} } as Response;
   let errorCaught: any;
   const next = (err?: any) => { errorCaught = err; };

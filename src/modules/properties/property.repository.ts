@@ -1,9 +1,9 @@
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import type {
   CreatePropertyInput,
   UpdatePropertyInput,
   PropertyListQuery,
-  LandlordPropertyStatsDTO,
 } from './property.types';
 
 export class PropertyRepository {
@@ -29,7 +29,7 @@ export class PropertyRepository {
    * Tạo khu trọ mới kèm danh sách tiện ích trong 1 transaction an toàn
    */
   public static async createProperty(landlordId: string, data: CreatePropertyInput) {
-    return prisma.$transaction(async (tx) => {
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const property = await tx.property.create({
         data: {
           landlordId,
@@ -142,7 +142,7 @@ export class PropertyRepository {
    * Cập nhật thông tin khu trọ và thay thế toàn bộ (replace full set) danh sách tiện ích
    */
   public static async updateProperty(propertyId: string, data: UpdatePropertyInput) {
-    return prisma.$transaction(async (tx) => {
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       await tx.propertyAmenity.deleteMany({
         where: { propertyId },
       });
@@ -196,29 +196,15 @@ export class PropertyRepository {
   }
 
   /**
-   * Tính toán thống kê phòng trọ của 1 khu trọ
+   * Đếm số lượng hợp đồng thuê đang có hiệu lực đối với các phòng trong khu trọ.
+   * Các trạng thái kết thúc/không còn hiệu lực gồm: TERMINATED, CANCELLED, EXPIRED, LIQUIDATED.
    */
-  public static calculateRoomStats(rooms: Array<{ occupancyStatus: string; isArchived?: boolean }>): LandlordPropertyStatsDTO {
-    const activeRooms = rooms.filter((r) => !r.isArchived);
-    let vacantRooms = 0;
-    let occupiedRooms = 0;
-    let maintenanceRooms = 0;
-
-    for (const room of activeRooms) {
-      if (room.occupancyStatus === 'VACANT') {
-        vacantRooms++;
-      } else if (room.occupancyStatus === 'MAINTENANCE') {
-        maintenanceRooms++;
-      } else if (room.occupancyStatus === 'RENTED' || room.occupancyStatus === 'HELD') {
-        occupiedRooms++;
-      }
-    }
-
-    return {
-      totalRooms: activeRooms.length,
-      vacantRooms,
-      occupiedRooms,
-      maintenanceRooms,
-    };
+  public static async countActiveContracts(propertyId: string): Promise<number> {
+    return prisma.contract.count({
+      where: {
+        room: { propertyId },
+        status: { notIn: ['TERMINATED', 'CANCELLED', 'EXPIRED', 'LIQUIDATED'] },
+      },
+    });
   }
 }

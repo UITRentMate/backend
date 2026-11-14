@@ -12,9 +12,39 @@ import type {
   PaginatedLandlordProperties,
   LandlordPropertyDetailDTO,
   PublicPropertyDetailDTO,
+  LandlordPropertyStatsDTO,
 } from './property.types';
 
 export class PropertyService {
+  /**
+   * Tính toán thống kê phòng trọ của 1 khu trọ (Domain Business Logic)
+   */
+  public static calculateRoomStats(
+    rooms: Array<{ occupancyStatus: string; isArchived?: boolean }>,
+  ): LandlordPropertyStatsDTO {
+    const activeRooms = rooms.filter((r) => !r.isArchived);
+    let vacantRooms = 0;
+    let occupiedRooms = 0;
+    let maintenanceRooms = 0;
+
+    for (const room of activeRooms) {
+      if (room.occupancyStatus === 'VACANT') {
+        vacantRooms++;
+      } else if (room.occupancyStatus === 'MAINTENANCE') {
+        maintenanceRooms++;
+      } else if (room.occupancyStatus === 'RENTED' || room.occupancyStatus === 'HELD') {
+        occupiedRooms++;
+      }
+    }
+
+    return {
+      totalRooms: activeRooms.length,
+      vacantRooms,
+      occupiedRooms,
+      maintenanceRooms,
+    };
+  }
+
   /**
    * Tạo khu trọ mới cho chủ trọ
    */
@@ -33,7 +63,7 @@ export class PropertyService {
     }
 
     const property = await PropertyRepository.createProperty(landlordId, input);
-    const stats = PropertyRepository.calculateRoomStats(property.rooms ?? []);
+    const stats = PropertyService.calculateRoomStats(property.rooms ?? []);
     return mapToLandlordPropertyDetail(property, stats);
   }
 
@@ -50,7 +80,7 @@ export class PropertyService {
     );
 
     const cards = items.map((item) => {
-      const stats = PropertyRepository.calculateRoomStats(item.rooms ?? []);
+      const stats = PropertyService.calculateRoomStats(item.rooms ?? []);
       return mapToLandlordPropertyCard(item, stats);
     });
 
@@ -83,7 +113,7 @@ export class PropertyService {
       );
     }
 
-    const stats = PropertyRepository.calculateRoomStats(property.rooms ?? []);
+    const stats = PropertyService.calculateRoomStats(property.rooms ?? []);
     return mapToLandlordPropertyDetail(property, stats);
   }
 
@@ -159,13 +189,13 @@ export class PropertyService {
     }
 
     const updated = await PropertyRepository.updateProperty(propertyId, input);
-    const stats = PropertyRepository.calculateRoomStats(updated.rooms ?? []);
+    const stats = PropertyService.calculateRoomStats(updated.rooms ?? []);
     return mapToLandlordPropertyDetail(updated, stats);
   }
 
   /**
    * Lưu trữ khu trọ (Archive)
-   * Chặn nếu khu trọ còn phòng đang có hợp đồng hoặc người thuê (RENTED / HELD)
+   * Chặn nếu khu trọ còn phòng đang có hợp đồng hoặc người thuê (RENTED / HELD) hoặc còn hợp đồng hiệu lực
    */
   public static async archiveProperty(
     landlordId: string,
@@ -192,6 +222,15 @@ export class PropertyService {
         409,
         'CONFLICT',
         'Không thể lưu trữ khu trọ khi vẫn còn phòng đang có hợp đồng hoặc người thuê',
+      );
+    }
+
+    const activeContractsCount = await PropertyRepository.countActiveContracts(propertyId);
+    if (activeContractsCount > 0) {
+      throw new ApiError(
+        409,
+        'CONFLICT',
+        'Không thể lưu trữ khu trọ khi vẫn còn hợp đồng thuê đang có hiệu lực',
       );
     }
 

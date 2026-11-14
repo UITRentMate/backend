@@ -8,7 +8,7 @@ import type {
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-const createPropertySchema = z
+const propertyPayloadSchema = z
   .object({
     name: z
       .string({ error: 'Tên khu trọ là bắt buộc' })
@@ -41,38 +41,8 @@ const createPropertySchema = z
   })
   .strict();
 
-const updatePropertySchema = z
-  .object({
-    name: z
-      .string({ error: 'Tên khu trọ là bắt buộc' })
-      .trim()
-      .min(1, 'Tên khu trọ không được để trống')
-      .max(200, 'Tên khu trọ không được vượt quá 200 ký tự'),
-    address: z
-      .string({ error: 'Địa chỉ là bắt buộc' })
-      .trim()
-      .min(1, 'Địa chỉ không được để trống')
-      .max(500, 'Địa chỉ không được vượt quá 500 ký tự'),
-    houseRules: z
-      .string()
-      .trim()
-      .max(2000, 'Nội quy không được vượt quá 2000 ký tự')
-      .nullable()
-      .optional()
-      .transform((val) => (val && val.length > 0 ? val : null)),
-    coverImageUrl: z
-      .preprocess(
-        (val) => (typeof val === 'string' && val.trim() === '' ? null : val),
-        z.string().trim().url('Đường dẫn ảnh bìa không hợp lệ').nullable().optional(),
-      )
-      .transform((val) => (val && val.length > 0 ? val : null)),
-    amenityIds: z
-      .array(z.string().regex(UUID_REGEX, 'Mã tiện ích phải là UUID hợp lệ'))
-      .optional()
-      .default([])
-      .transform((ids) => Array.from(new Set(ids))),
-  })
-  .strict();
+const createPropertySchema = propertyPayloadSchema;
+const updatePropertySchema = propertyPayloadSchema;
 
 function parseZod<T>(schema: z.ZodType<T>, data: unknown): T {
   const result = schema.safeParse(data);
