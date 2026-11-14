@@ -23,7 +23,6 @@ export class ApiError extends Error {
     this.code = code;
     this.errors = errors;
 
-    // Duy trì prototype chain chính xác khi kế thừa Error trong TypeScript
     Object.setPrototypeOf(this, new.target.prototype);
   }
 }

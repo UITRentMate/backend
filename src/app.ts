@@ -1,15 +1,35 @@
 import express, { type Request, type Response } from 'express';
-import { roomRouter } from './modules/rooms/room.routes';
+
 import { errorHandler } from './common/middleware/error-handler';
+
+import { authRoutes } from './modules/auth/auth.routes';
+import { roomRouter } from './modules/rooms/room.routes';
+import { usersRoutes } from './modules/users/users.routes';
 
 export const app = express();
 
-// CORS Middleware hỗ trợ Local Dev, FE (Next.js/React) và Web Swagger Editor
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
-  res.setHeader('Access-Control-Allow-Private-Network', 'true');
+  const origin = req.header('Origin');
+  if (origin) {
+    res.vary('Origin');
+    const allowedOrigins = new Set(
+      (process.env.CORS_ORIGINS ?? '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    );
+
+    if (allowedOrigins.has(origin)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+
+      if (req.header('Access-Control-Request-Private-Network') === 'true') {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+      }
+    }
+  }
 
   if (req.method === 'OPTIONS') {
     res.status(204).end();
@@ -19,6 +39,8 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json());
+app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/users', usersRoutes);
 
 app.get('/health', (_req: Request, res: Response) => {
   res.status(200).json({
