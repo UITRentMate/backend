@@ -17,8 +17,13 @@
 - Tuân thủ nghiêm ngặt `AGENTS.md`: không tự ý cài đặt thêm dependency nếu chưa được phê duyệt; sử dụng Prisma Client singleton duy nhất tại `src/infrastructure/database/prisma.ts`.
 - Không gọi Prisma trực tiếp trong Service hoặc Controller; mọi thao tác DB với Property phải qua `PropertyRepository`.
 - Không có trường `Property.description` hay `Property.isArchived` trong Prisma Schema hiện tại; trạng thái khu trọ được quản lý hoàn toàn bằng cột `Property.status` (`ACTIVE`, `INACTIVE`, `ARCHIVED`).
+- Khi tạo mới khu trọ (`POST /api/v1/landlord/properties`), mặc định gán `Property.status = 'ACTIVE'`; trường `coverImageUrl` là tùy chọn (nullable).
 - Lấy `landlordId` duy nhất từ danh tính đã xác thực (`res.locals.userId`), tuyệt đối không tin cậy `landlordId` gửi từ request body hay query.
-- API công khai `GET /api/v1/properties/{propertyId}` không yêu cầu token, chỉ trả về dữ liệu khi: `Property.status === 'ACTIVE'` AND `User(landlord).accountStatus === 'ACTIVE'` AND tồn tại ít nhất 1 phòng thỏa mãn Room Discovery (`occupancyStatus === 'VACANT'` AND `visibilityStatus === 'VISIBLE'` AND `isArchived === false`). Nếu không thỏa, trả về `404 Not Found`.
+- Kiểm tra danh sách tiện ích (`amenityIds`): chỉ chấp nhận các tiện ích có `scope` tương thích với khu trọ (`scope === 'PROPERTY'` hoặc `BOTH`), từ chối các tiện ích có `scope === 'ROOM'`.
+- Khi Chủ trọ A cố truy cập/chỉnh sửa khu trọ của Chủ trọ B, hệ thống trả về `404 NOT_FOUND` ("Khu trọ không tồn tại hoặc bạn không có quyền truy cập") để bảo mật và chống dò quét ID.
+- Khi cập nhật khu trọ bằng `PUT /api/v1/landlord/properties/{propertyId}`, thực hiện thay thế toàn bộ (replace full set) danh sách tiện ích trong transaction.
+- Khi lưu trữ khu trọ (`PATCH .../archive`), chỉ cho phép chuyển sang `ARCHIVED` khi không còn phòng nào đang thuê (`RENTED`), đang giữ chỗ (`HELD`) hoặc có hợp đồng còn hiệu lực; nếu vi phạm trả về `409 CONFLICT`.
+- API công khai `GET /api/v1/properties/{propertyId}` không yêu cầu token, chỉ trả về dữ liệu khi: `Property.status === 'ACTIVE'` AND `User(landlord).accountStatus === 'ACTIVE'` AND tồn tại ít nhất 1 phòng thỏa mãn Room Discovery (`occupancyStatus === 'VACANT'` AND `visibilityStatus === 'VISIBLE'` AND `isArchived === false`). Nếu không thỏa, trả về `404 Not Found`. Response nhúng trực tiếp mảng `rooms: PublicRoomCardDTO[]` (tối đa 50 phòng) mà không phân trang.
 - Tuyệt đối không để lộ thông tin nhạy cảm của Chủ trọ (mật khẩu, passwordHash, CCCD, thông tin ngân hàng, số điện thoại cá nhân không công khai) trong bất kỳ response nào.
 - Error format chuẩn: `{ success: false, code: string, message: string, traceId: string, errors?: Record<string, string[]> }` dùng `ApiError`.
 
