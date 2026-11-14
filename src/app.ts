@@ -6,6 +6,7 @@ import { authRoutes } from './modules/auth/auth.routes';
 import { propertyRouter } from './modules/properties/property.routes';
 import { roomRouter } from './modules/rooms/room.routes';
 import { usersRoutes } from './modules/users/users.routes';
+import { viewingAppointmentRouter } from './modules/viewing-appointments/viewing-appointment.routes';
 
 export const app = express();
 
@@ -55,6 +56,9 @@ app.use(roomRouter);
 
 // Phân hệ Quản lý & Chi tiết Khu trọ (BE-P2-01)
 app.use(propertyRouter);
+
+// Phân hệ Quản lý Lịch hẹn Xem phòng (BE-P2-05)
+app.use(viewingAppointmentRouter);
 
 // Global Error Handler Middleware
 app.use(errorHandler);

@@ -208,9 +208,12 @@ model ViewingAppointment {
   tenantId       String   @map("tenant_id") @db.Uuid
   contactPhone   String   @map("contact_phone") @db.VarChar(20)
   status         String   @db.VarChar(30)
-  selectedSlotId String?  @map("selected_slot_id") @db.Uuid
-  viewedById     String?  @map("viewed_by_id") @db.Uuid
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  selectedSlotId     String?  @map("selected_slot_id") @db.Uuid
+  viewedById         String?  @map("viewed_by_id") @db.Uuid
+  note               String?  @db.Text
+  rejectionReason    String?  @map("rejection_reason") @db.Text
+  cancellationReason String?  @map("cancellation_reason") @db.Text
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   // Relations
   room         Room                @relation(fields: [roomId], references: [id], onDelete: Restrict)
