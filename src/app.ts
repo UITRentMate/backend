@@ -3,6 +3,7 @@ import express, { type Request, type Response } from 'express';
 import { errorHandler } from './common/middleware/error-handler';
 
 import { authRoutes } from './modules/auth/auth.routes';
+import { propertyRouter } from './modules/properties/property.routes';
 import { roomRouter } from './modules/rooms/room.routes';
 import { usersRoutes } from './modules/users/users.routes';
 
@@ -51,6 +52,9 @@ app.get('/health', (_req: Request, res: Response) => {
 
 // Phân hệ Room Discovery (SEARCH-01 & SEARCH-02)
 app.use(roomRouter);
+
+// Phân hệ Quản lý & Chi tiết Khu trọ (BE-P2-01)
+app.use(propertyRouter);
 
 // Global Error Handler Middleware
 app.use(errorHandler);
