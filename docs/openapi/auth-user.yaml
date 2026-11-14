@@ -1,0 +1,456 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Authentication & User API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Xác thực (Authentication) & Người dùng (User)** thuộc nền tảng RentMate.
+    Bao gồm các endpoint đăng ký tài khoản, đăng nhập, làm mới access token, đăng xuất và lấy thông tin tài khoản hiện tại.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: Authentication
+    description: Các API quản lý phiên đăng nhập và định danh tài khoản người dùng.
+  - name: Users
+    description: Các API thông tin người dùng.
+
+paths:
+  /api/v1/auth/register:
+    post:
+      tags:
+        - Authentication
+      summary: Đăng ký tài khoản người dùng mới
+      description: |
+        Tạo tài khoản mới cho người thuê (`TENANT`).
+        Tài khoản sau khi tạo có trạng thái mặc định là `ACTIVE`.
+        Mật khẩu được băm an toàn với bcrypt (12 rounds) trước khi lưu trữ.
+      operationId: register
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Đăng ký tài khoản thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Đăng nhập hệ thống
+      description: |
+        Xác thực người dùng qua email hoặc số điện thoại kèm mật khẩu.
+        Khi thành công, trả về Access Token (thời hạn 1 giờ) qua JSON body và Refresh Token (thời hạn 7 ngày) qua HttpOnly Cookie `refreshToken`.
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Đăng nhập thành công
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "refreshToken=eyJ...; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"
+              description: Refresh token lưu trong HttpOnly cookie
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/auth/refresh:
+    post:
+      tags:
+        - Authentication
+      summary: Làm mới access token
+      description: |
+        Đổi Refresh Token hợp lệ (gửi qua HttpOnly cookie `refreshToken`) lấy cặp Access Token mới và xoay vòng Refresh Token mới.
+        Refresh Token cũ bị thu hồi để ngăn chặn tấn công phát lại (replay attack).
+      operationId: refreshToken
+      parameters:
+        - in: cookie
+          name: refreshToken
+          required: true
+          schema:
+            type: string
+          description: Refresh token nhận từ phiên đăng nhập
+      responses:
+        '200':
+          description: Cấp access token mới thành công
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "refreshToken=eyJ...; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800"
+              description: Refresh token mới sau khi xoay vòng
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshTokenResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: Đăng xuất hệ thống
+      description: |
+        Thu hồi Refresh Token hiện tại và xóa HttpOnly cookie `refreshToken`.
+      operationId: logout
+      parameters:
+        - in: cookie
+          name: refreshToken
+          required: false
+          schema:
+            type: string
+          description: Refresh token cần thu hồi
+      responses:
+        '200':
+          description: Đăng xuất thành công
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "refreshToken=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+              description: Xóa cookie refresh token
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - message
+                properties:
+                  message:
+                    type: string
+                    example: "Đăng xuất thành công"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/users/me:
+    get:
+      tags:
+        - Users
+      summary: Xem thông tin tài khoản hiện tại
+      description: |
+        Lấy thông tin tài khoản của người dùng đang đăng nhập qua JWT Bearer token.
+        Tuyệt đối không bao giờ trả về trường `passwordHash`.
+      operationId: getCurrentUser
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Thông tin tài khoản người dùng
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentUserResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Access Token cấp từ API Login hoặc Refresh, gửi qua Authorization header Bearer.
+
+  schemas:
+    RegisterRequest:
+      type: object
+      required:
+        - fullName
+        - email
+        - phone
+        - password
+        - confirmPassword
+        - acceptedTerms
+      properties:
+        fullName:
+          type: string
+          minLength: 1
+          maxLength: 150
+          example: "Nguyen Van A"
+          description: Họ và tên đầy đủ
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          example: "nguyenvana@example.com"
+          description: Địa chỉ email đăng ký
+        phone:
+          type: string
+          pattern: '^0\d{9}$'
+          example: "0901234567"
+          description: Số điện thoại Việt Nam gồm 10 chữ số bắt đầu bằng số 0
+        password:
+          type: string
+          minLength: 8
+          maxLength: 72
+          example: "Password@123"
+          description: Mật khẩu (tối thiểu 8 ký tự, có chữ hoa, chữ thường, số, ký tự đặc biệt, tối đa 72 byte)
+        confirmPassword:
+          type: string
+          example: "Password@123"
+          description: Mật khẩu xác nhận phải trùng khớp với password
+        acceptedTerms:
+          type: boolean
+          enum: [true]
+          example: true
+          description: Người dùng bắt buộc phải chấp nhận điều khoản sử dụng
+
+    RegisterResponse:
+      type: object
+      required:
+        - userId
+        - fullName
+        - role
+        - status
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        fullName:
+          type: string
+          example: "Nguyen Van A"
+        role:
+          type: string
+          enum: [TENANT]
+          example: "TENANT"
+        status:
+          type: string
+          enum: [ACTIVE]
+          example: "ACTIVE"
+
+    LoginRequest:
+      type: object
+      required:
+        - username
+        - password
+      properties:
+        username:
+          type: string
+          minLength: 1
+          example: "nguyenvana@example.com"
+          description: Địa chỉ email hoặc số điện thoại đã đăng ký
+        password:
+          type: string
+          minLength: 1
+          maxLength: 72
+          example: "Password@123"
+          description: Mật khẩu tài khoản
+
+    LoginUserDTO:
+      type: object
+      required:
+        - userId
+        - role
+        - status
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        role:
+          type: string
+          enum: [TENANT, LANDLORD, ADMIN]
+          example: "TENANT"
+        status:
+          type: string
+          enum: [ACTIVE, LOCKED, INACTIVE]
+          example: "ACTIVE"
+
+    LoginResponse:
+      type: object
+      required:
+        - user
+        - accessToken
+        - expiresIn
+      properties:
+        user:
+          $ref: '#/components/schemas/LoginUserDTO'
+        accessToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+          description: JWT Access token có hiệu lực trong 3600 giây (1 giờ)
+        expiresIn:
+          type: integer
+          example: 3600
+          description: Thời gian hiệu lực của access token tính bằng giây
+
+    RefreshTokenResponse:
+      type: object
+      required:
+        - accessToken
+        - expiresIn
+      properties:
+        accessToken:
+          type: string
+          example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        expiresIn:
+          type: integer
+          example: 3600
+
+    CurrentUserResponse:
+      type: object
+      required:
+        - userId
+        - fullName
+        - email
+        - phone
+        - role
+        - status
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        fullName:
+          type: string
+          example: "Nguyen Van A"
+        email:
+          type: string
+          format: email
+          example: "nguyenvana@example.com"
+        phone:
+          type: string
+          example: "0901234567"
+        role:
+          type: string
+          enum: [TENANT, LANDLORD, ADMIN]
+          example: "TENANT"
+        status:
+          type: string
+          enum: [ACTIVE, LOCKED, INACTIVE]
+          example: "ACTIVE"
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu không hợp lệ"
+        traceId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Dữ liệu gửi lên không đúng định dạng hoặc thiếu trường bắt buộc
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu không hợp lệ"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+            errors:
+              email: ["Email không hợp lệ"]
+
+    UnauthorizedError:
+      description: Thiếu access token hoặc token/phiên không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    ForbiddenError:
+      description: Tài khoản bị khóa hoặc không có quyền truy cập
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "ACCOUNT_LOCKED"
+            message: "Tài khoản đã bị khóa hoặc chưa kích hoạt"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    ConflictError:
+      description: Xung đột dữ liệu (Email hoặc số điện thoại đã tồn tại)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "EMAIL_ALREADY_EXISTS"
+            message: "Email đã được sử dụng"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    InternalError:
+      description: Lỗi hệ thống nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
