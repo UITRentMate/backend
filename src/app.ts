@@ -1,6 +1,9 @@
 import express, { type Request, type Response } from 'express';
+
 import { errorHandler } from './common/middleware/error-handler';
+
 import { authRoutes } from './modules/auth/auth.routes';
+import { roomRouter } from './modules/rooms/room.routes';
 import { usersRoutes } from './modules/users/users.routes';
 
 export const app = express();
@@ -46,4 +49,8 @@ app.get('/health', (_req: Request, res: Response) => {
   });
 });
 
+// Phân hệ Room Discovery (SEARCH-01 & SEARCH-02)
+app.use(roomRouter);
+
+// Global Error Handler Middleware
 app.use(errorHandler);
