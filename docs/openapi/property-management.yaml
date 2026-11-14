@@ -1,0 +1,708 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Property Management & Public Detail API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Quản lý khu trọ và xem chi tiết khu trọ công khai (BE-P2-01)**.
+    Bao gồm các endpoint nghiệp vụ dành cho Chủ trọ (`LANDLORD`) và endpoint xem thông tin chi tiết khu trọ công khai dành cho Khách vãng lai.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: https://api.rentmate.vn
+    description: Production API Server
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: Landlord Properties
+    description: Các API quản lý khu trọ dành riêng cho Chủ trọ đã đăng nhập và được cấp quyền LANDLORD.
+  - name: Public Properties
+    description: Các API công khai tra cứu thông tin chi tiết khu trọ dành cho người tìm trọ.
+
+paths:
+  /api/v1/landlord/properties:
+    post:
+      tags:
+        - Landlord Properties
+      summary: Tạo mới khu trọ
+      description: |
+        Chủ trọ tạo một khu trọ mới. Trạng thái mặc định là `ACTIVE`.
+        Danh tính `landlordId` được trích xuất an toàn từ JWT Token.
+      operationId: createLandlordProperty
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePropertyRequest'
+      responses:
+        '201':
+          description: Tạo khu trọ thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordPropertyDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - Landlord Properties
+      summary: Lấy danh sách khu trọ của chủ trọ hiện tại
+      description: |
+        Trả về danh sách khu trọ do chính chủ trọ sở hữu, kèm theo thống kê phòng trọ và phân trang.
+      operationId: getLandlordProperties
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Số trang hiện tại
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+          description: Số bản ghi trên mỗi trang
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Từ khóa tìm kiếm theo tên hoặc địa chỉ khu trọ
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE, ARCHIVED]
+          description: Lọc theo trạng thái khu trọ
+      responses:
+        '200':
+          description: Danh sách khu trọ của chủ trọ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedLandlordPropertiesResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/landlord/properties/{propertyId}:
+    get:
+      tags:
+        - Landlord Properties
+      summary: Lấy chi tiết khu trọ để quản lý
+      description: |
+        Chủ trọ xem chi tiết khu trọ của mình, bao gồm toàn bộ danh sách phòng (kể cả phòng HIDDEN, MAINTENANCE, RENTED).
+        Nếu khu trọ thuộc chủ trọ khác hoặc không tồn tại, trả về 404 để chống rò rỉ ID.
+      operationId: getLandlordPropertyDetail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyIdParam'
+      responses:
+        '200':
+          description: Chi tiết khu trọ để quản lý
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordPropertyDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    put:
+      tags:
+        - Landlord Properties
+      summary: Cập nhật thông tin khu trọ
+      description: |
+        Chủ trọ cập nhật tên, địa chỉ, nội quy và danh sách tiện ích của khu trọ.
+        Danh sách tiện ích mới sẽ thay thế toàn bộ danh sách tiện ích cũ trong transaction.
+      operationId: updateLandlordProperty
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePropertyRequest'
+      responses:
+        '200':
+          description: Cập nhật khu trọ thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordPropertyDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/landlord/properties/{propertyId}/archive:
+    patch:
+      tags:
+        - Landlord Properties
+      summary: Lưu trữ khu trọ
+      description: |
+        Chuyển trạng thái khu trọ thành `ARCHIVED`. Chỉ thực hiện được khi khu trọ không còn phòng nào đang thuê (RENTED), đang giữ cọc (HELD) hoặc có hợp đồng còn hiệu lực.
+      operationId: archiveLandlordProperty
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyIdParam'
+      responses:
+        '200':
+          description: Lưu trữ khu trọ thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/properties/{propertyId}:
+    get:
+      tags:
+        - Public Properties
+      summary: Xem chi tiết khu trọ công khai
+      description: |
+        Khách xem thông tin khu trọ công khai kèm danh sách phòng đang mở bán (tối đa 50 phòng).
+        Khu trọ chỉ hiển thị khi `Property.status === 'ACTIVE'`, Chủ trọ `accountStatus === 'ACTIVE'`, và có ít nhất 1 phòng thỏa mãn Room Discovery (`VACANT + VISIBLE + !isArchived`).
+        Nếu không thỏa, trả về 404 NOT_FOUND.
+      operationId: getPublicPropertyDetail
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyIdParam'
+      responses:
+        '200':
+          description: Thông tin khu trọ công khai
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicPropertyDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Access Token cấp qua Authorization header Bearer.
+
+  parameters:
+    PropertyIdParam:
+      name: propertyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Mã UUID định danh của khu trọ.
+
+  schemas:
+    CreatePropertyRequest:
+      type: object
+      required:
+        - name
+        - address
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Tên khu trọ/tòa nhà.
+          example: "Khu trọ Sinh viên Hòa Bình"
+        address:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Địa chỉ chi tiết của khu trọ.
+          example: "123 Đường Đỗ Xuân Hợp, Phước Long B, Thủ Đức, TP.HCM"
+        houseRules:
+          type:
+            - string
+            - "null"
+          maxLength: 2000
+          description: Nội quy khu trọ (tùy chọn).
+          example: "Giờ giấc tự do, khóa vân tay. Không tụ tập ồn ào sau 23h."
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Đường dẫn ảnh bìa (tùy chọn khi khởi tạo).
+          example: "https://images.unsplash.com/photo-1545324418-cc1a3fa10c00"
+        amenityIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Danh sách UUID tiện ích chung của khu trọ (chỉ nhận scope PROPERTY hoặc BOTH).
+          example:
+            - "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+
+    UpdatePropertyRequest:
+      type: object
+      required:
+        - name
+        - address
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "Khu trọ Cao cấp Hòa Bình"
+        address:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: "123 Đường Đỗ Xuân Hợp, Phước Long B, Thủ Đức, TP.HCM"
+        houseRules:
+          type:
+            - string
+            - "null"
+          maxLength: 2000
+          example: "Khóa cổng tự động, có bảo vệ 24/7."
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          example: "https://images.unsplash.com/photo-1545324418-cc1a3fa10c00"
+        amenityIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Danh sách tiện ích cập nhật (sẽ thay thế toàn bộ danh sách cũ).
+
+    AmenityDTO:
+      type: object
+      required:
+        - id
+        - name
+        - scope
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scope:
+          type: string
+
+    LandlordPropertyStatsDTO:
+      type: object
+      required:
+        - totalRooms
+        - vacantRooms
+        - occupiedRooms
+        - maintenanceRooms
+      properties:
+        totalRooms:
+          type: integer
+          example: 12
+        vacantRooms:
+          type: integer
+          example: 5
+        occupiedRooms:
+          type: integer
+          example: 6
+        maintenanceRooms:
+          type: integer
+          example: 1
+
+    LandlordPropertyCardDTO:
+      type: object
+      required:
+        - id
+        - name
+        - address
+        - status
+        - stats
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address:
+          type: string
+        houseRules:
+          type:
+            - string
+            - "null"
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, ARCHIVED]
+        stats:
+          $ref: '#/components/schemas/LandlordPropertyStatsDTO'
+        amenities:
+          type: array
+          items:
+            $ref: '#/components/schemas/AmenityDTO'
+        createdAt:
+          type: string
+          format: date-time
+
+    LandlordRoomItemDTO:
+      type: object
+      required:
+        - id
+        - roomCode
+        - monthlyRent
+        - depositRequired
+        - occupancyStatus
+        - visibilityStatus
+        - isArchived
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomCode:
+          type: string
+        floor:
+          type:
+            - integer
+            - "null"
+        areaM2:
+          type: number
+        maxOccupants:
+          type: integer
+        monthlyRent:
+          type: number
+        depositRequired:
+          type: number
+        occupancyStatus:
+          type: string
+        visibilityStatus:
+          type: string
+        isArchived:
+          type: boolean
+
+    LandlordPropertyDetailResponse:
+      type: object
+      required:
+        - id
+        - name
+        - address
+        - status
+        - stats
+        - amenities
+        - rooms
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address:
+          type: string
+        houseRules:
+          type:
+            - string
+            - "null"
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+        status:
+          type: string
+        stats:
+          $ref: '#/components/schemas/LandlordPropertyStatsDTO'
+        amenities:
+          type: array
+          items:
+            $ref: '#/components/schemas/AmenityDTO'
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/LandlordRoomItemDTO'
+        createdAt:
+          type: string
+          format: date-time
+
+    PaginatedLandlordPropertiesResponse:
+      type: object
+      required:
+        - items
+        - page
+        - pageSize
+        - totalItems
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LandlordPropertyCardDTO'
+        page:
+          type: integer
+        pageSize:
+          type: integer
+        totalItems:
+          type: integer
+        totalPages:
+          type: integer
+
+    PublicLandlordProfileDTO:
+      type: object
+      required:
+        - id
+        - fullName
+      properties:
+        id:
+          type: string
+          format: uuid
+        fullName:
+          type: string
+
+    PublicRoomSummaryDTO:
+      type: object
+      required:
+        - id
+        - roomCode
+        - areaM2
+        - maxOccupants
+        - monthlyRent
+        - depositRequired
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomCode:
+          type: string
+        floor:
+          type:
+            - integer
+            - "null"
+        areaM2:
+          type: number
+        maxOccupants:
+          type: integer
+        monthlyRent:
+          type: number
+        depositRequired:
+          type: number
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+
+    PublicPropertyDetailResponse:
+      type: object
+      required:
+        - id
+        - name
+        - address
+        - landlord
+        - amenities
+        - rooms
+        - totalVacantRooms
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address:
+          type: string
+        houseRules:
+          type:
+            - string
+            - "null"
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+        landlord:
+          $ref: '#/components/schemas/PublicLandlordProfileDTO'
+        amenities:
+          type: array
+          items:
+            $ref: '#/components/schemas/AmenityDTO'
+        rooms:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicRoomSummaryDTO'
+        totalVacantRooms:
+          type: integer
+          description: Tổng số phòng thỏa mãn điều kiện Room Discovery của khu trọ này.
+
+    SuccessMessageResponse:
+      type: object
+      required:
+        - success
+        - message
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: "Lưu trữ khu trọ thành công"
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu không hợp lệ"
+        traceId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Dữ liệu gửi lên không đúng định dạng hoặc thiếu trường bắt buộc
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+            errors:
+              name: ["Tên khu trọ không được để trống"]
+
+    Unauthorized:
+      description: Chưa xác thực (thiếu hoặc sai Bearer Token)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token để truy cập"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Forbidden:
+      description: Tài khoản không có quyền Chủ trọ hoặc bị khóa
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FORBIDDEN"
+            message: "Bạn không có quyền thực hiện thao tác này"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    NotFound:
+      description: Khu trọ không tồn tại hoặc không đủ điều kiện công khai (cũng dùng khi không có quyền để chống dò quét ID)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "PROPERTY_NOT_FOUND"
+            message: "Khu trọ không tồn tại hoặc hiện không khả dụng"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Conflict:
+      description: Xung đột nghiệp vụ (ví dụ không thể lưu trữ khu trọ khi vẫn còn phòng đang thuê)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "CONFLICT"
+            message: "Không thể lưu trữ khu trọ khi vẫn còn phòng đang có hợp đồng hoạt động"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    InternalError:
+      description: Lỗi máy chủ không xác định
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
