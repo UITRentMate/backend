@@ -1,0 +1,679 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Rental Requests API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Yêu cầu thuê phòng (BE-P2-06 / Issue #19)** thuộc nền tảng RentMate.
+    Bao gồm các endpoint gửi yêu cầu thuê phòng công khai, xem danh sách, xem chi tiết và chủ trọ từ chối yêu cầu.
+
+    ### Vòng đời trạng thái (State Machine):
+    ```text
+    PENDING ──► REJECTED (Chỉ chủ trọ sở hữu phòng được phép từ chối kèm lý do)
+    ```
+    - Trong Phase 2, chỉ cho phép chuyển trạng thái `PENDING -> REJECTED`.
+    - Trạng thái `PENDING` được giữ nguyên cho tới khi có thao tác từ chối hợp lệ hoặc xử lý ở phase sau.
+    - Loại trừ rõ ràng khỏi Phase 2: Phê duyệt (`/approve`), giữ phòng (`HELD`), hợp đồng, đặt cọc và các nghiệp vụ tài chính.
+    - Tạo hoặc từ chối yêu cầu thuê **không thay đổi** `Room.occupancyStatus` và không đồng nghĩa với giữ phòng.
+
+    ### Rào chắn bảo mật & Phân quyền (Data Scopes):
+    - **Người thuê (`TENANT`):** Chỉ được gửi yêu cầu cho phòng công khai (`VACANT`, `VISIBLE`, `isArchived=false`, `Property.status=ACTIVE`, `Landlord.accountStatus=ACTIVE`); chỉ xem được danh sách và chi tiết yêu cầu do chính mình tạo (`tenantId`).
+    - **Chủ trọ (`LANDLORD`):** Chỉ xem được danh sách, chi tiết và từ chối các yêu cầu thuộc các phòng nằm trong khu trọ do mình sở hữu (`room.property.landlordId`).
+    - **Không đọc chéo:** Không có quyền đọc chéo dữ liệu giữa các người thuê hoặc giữa các chủ trọ với nhau.
+    - **Bảo mật dữ liệu cá nhân:** Tuyệt đối không trả về `passwordHash`, `email`, `phone` của người thuê trong các API danh sách/chi tiết trừ khi được cấp quyền riêng.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: Rental Requests
+    description: Các API quản lý yêu cầu thuê phòng dành cho Người thuê (`TENANT`) và Chủ trọ (`LANDLORD`).
+
+paths:
+  /api/v1/rental-requests:
+    post:
+      tags:
+        - Rental Requests
+      summary: Gửi yêu cầu thuê phòng công khai (RENT-01)
+      description: |
+        Người thuê (`TENANT`) gửi yêu cầu thuê cho một phòng trọ đang hiển thị công khai.
+        Hệ thống tự động gán `tenantId` từ token xác thực và đặt trạng thái ban đầu là `PENDING`.
+        
+        **Quy tắc phòng đủ điều kiện gửi yêu cầu:**
+        - `Room.occupancyStatus === 'VACANT'`
+        - `Room.visibilityStatus === 'VISIBLE'`
+        - `Room.isArchived === false`
+        - `Property.status === 'ACTIVE'`
+        - `Property.landlord.accountStatus === 'ACTIVE'`
+        Nếu phòng không tồn tại hoặc không đủ điều kiện công khai, trả về lỗi `404 ROOM_NOT_FOUND` để chống rò rỉ dữ liệu nội bộ.
+
+        **Chống gửi trùng lặp & Race Condition:**
+        Một người thuê không thể có nhiều hơn một yêu cầu `PENDING` cho cùng một phòng trọ.
+        Xử lý đồng thời bằng Serializable transaction retry và partial unique index; nếu trùng lặp trả về `409 DUPLICATE_RENTAL_REQUEST`.
+      operationId: createRentalRequest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRentalRequestRequest'
+      responses:
+        '201':
+          description: Gửi yêu cầu thuê thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RentalRequestCreatedResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - Rental Requests
+      summary: Lấy danh sách yêu cầu thuê (RENT-02)
+      description: |
+        Tra cứu danh sách yêu cầu thuê theo phạm vi quyền của tài khoản hiện tại:
+        - Nếu là `TENANT`: chỉ trả về các yêu cầu do chính mình gửi (`tenantId = currentUser.id`).
+        - Nếu là `LANDLORD`: chỉ trả về các yêu cầu gửi đến các phòng thuộc khu trọ do mình sở hữu (`room.property.landlordId = currentUser.id`).
+      operationId: getRentalRequests
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING, REJECTED]
+          description: Lọc theo trạng thái yêu cầu thuê
+        - name: roomId
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Lọc theo mã định danh phòng trọ
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Số trang hiện tại
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+          description: Số lượng bản ghi trên mỗi trang
+      responses:
+        '200':
+          description: Danh sách yêu cầu thuê kèm phân trang
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRentalRequestsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/rental-requests/{requestId}:
+    get:
+      tags:
+        - Rental Requests
+      summary: Xem chi tiết yêu cầu thuê (RENT-03)
+      description: |
+        Xem thông tin chi tiết một yêu cầu thuê.
+        Chỉ Người thuê sở hữu yêu cầu hoặc Chủ trọ sở hữu phòng trọ mới có quyền xem.
+        Nếu yêu cầu không tồn tại hoặc không thuộc quyền quản lý, trả về lỗi `404 RENTAL_REQUEST_NOT_FOUND` để chống dò quét ID.
+      operationId: getRentalRequestDetail
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Mã định danh yêu cầu thuê
+      responses:
+        '200':
+          description: Chi tiết yêu cầu thuê
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RentalRequestDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/rental-requests/{requestId}/reject:
+    patch:
+      tags:
+        - Rental Requests
+      summary: Chủ trọ từ chối yêu cầu thuê (RENT-05)
+      description: |
+        Chủ trọ sở hữu phòng trọ từ chối yêu cầu thuê đang ở trạng thái `PENDING`.
+        Bắt buộc phải cung cấp lý do từ chối (`reason`).
+        
+        **Ràng buộc trạng thái & Xử lý đồng thời:**
+        - Chỉ cho phép từ chối khi trạng thái hiện tại là `PENDING`.
+        - Nếu yêu cầu đã bị từ chối trước đó hoặc không còn ở trạng thái `PENDING`, trả về lỗi `409 INVALID_STATUS_TRANSITION`.
+        - Thao tác cập nhật mang tính nguyên tử (atomic conditional update); không phát sinh race condition khi gửi nhiều yêu cầu từ chối đồng thời.
+      operationId: rejectRentalRequest
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Mã định danh yêu cầu thuê cần từ chối
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectRentalRequestRequest'
+      responses:
+        '200':
+          description: Từ chối yêu cầu thuê thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RejectRentalRequestResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Access Token cấp từ API Login/Refresh gửi qua header Authorization Bearer.
+
+  schemas:
+    CreateRentalRequestRequest:
+      type: object
+      required:
+        - roomId
+        - desiredMoveInDate
+      properties:
+        roomId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+          description: Mã UUID của phòng trọ cần thuê
+        desiredMoveInDate:
+          type: string
+          format: date
+          example: "2026-11-20"
+          description: Ngày dự kiến bắt đầu thuê (định dạng YYYY-MM-DD, không được ở trong quá khứ)
+        durationMonths:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+          maximum: 60
+          example: 6
+          description: Thời hạn dự kiến thuê tính bằng tháng (1 đến 60 tháng, không bắt buộc)
+        message:
+          type:
+            - string
+            - "null"
+          maxLength: 1000
+          example: "Tôi muốn thuê phòng từ ngày 20/11, mong chủ trọ sớm phản hồi."
+          description: Lời nhắn gửi chủ trọ (không bắt buộc, tối đa 1000 ký tự)
+
+    RentalRequestCreatedResponse:
+      type: object
+      required:
+        - rentalRequestId
+        - status
+        - desiredMoveInDate
+        - createdAt
+      properties:
+        rentalRequestId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        status:
+          type: string
+          enum: [PENDING]
+          example: "PENDING"
+        desiredMoveInDate:
+          type: string
+          format: date
+          example: "2026-11-20"
+        durationMonths:
+          type:
+            - integer
+            - "null"
+          example: 6
+        message:
+          type:
+            - string
+            - "null"
+          example: "Tôi muốn thuê phòng từ ngày 20/11, mong chủ trọ sớm phản hồi."
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-14T12:00:00.000Z"
+
+    RoomSummaryDTO:
+      type: object
+      required:
+        - id
+        - roomCode
+        - property
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        roomCode:
+          type: string
+          example: "P.201"
+        property:
+          type: object
+          required:
+            - id
+            - name
+          properties:
+            id:
+              type: string
+              format: uuid
+              example: "660e8400-e29b-41d4-a716-446655440001"
+            name:
+              type: string
+              example: "Nhà trọ Thanh Xuân"
+
+    RoomDetailDTO:
+      type: object
+      required:
+        - id
+        - roomCode
+        - monthlyRent
+        - property
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        roomCode:
+          type: string
+          example: "P.201"
+        monthlyRent:
+          type: number
+          example: 3500000
+        property:
+          type: object
+          required:
+            - id
+            - name
+            - address
+          properties:
+            id:
+              type: string
+              format: uuid
+              example: "660e8400-e29b-41d4-a716-446655440001"
+            name:
+              type: string
+              example: "Nhà trọ Thanh Xuân"
+            address:
+              type: string
+              example: "123 Đường Linh Trung, Phường Linh Trung, TP. Thủ Đức, TP. Hồ Chí Minh"
+
+    TenantSummaryDTO:
+      type: object
+      required:
+        - id
+        - fullName
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "770e8400-e29b-41d4-a716-446655440002"
+        fullName:
+          type: string
+          example: "Nguyễn Văn Người Thuê"
+
+    RentalRequestSummaryItem:
+      type: object
+      required:
+        - id
+        - rentalRequestId
+        - roomId
+        - status
+        - desiredMoveInDate
+        - createdAt
+        - room
+        - tenant
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        rentalRequestId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        roomId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        status:
+          type: string
+          enum: [PENDING, REJECTED]
+          example: "PENDING"
+        desiredMoveInDate:
+          type: string
+          format: date
+          example: "2026-11-20"
+        durationMonths:
+          type:
+            - integer
+            - "null"
+          example: 6
+        message:
+          type:
+            - string
+            - "null"
+          example: "Tôi muốn thuê phòng từ ngày 20/11"
+        rejectionReason:
+          type:
+            - string
+            - "null"
+          example: null
+        reviewedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          example: null
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-14T12:00:00.000Z"
+        room:
+          $ref: '#/components/schemas/RoomSummaryDTO'
+        tenant:
+          $ref: '#/components/schemas/TenantSummaryDTO'
+
+    RentalRequestDetailResponse:
+      type: object
+      required:
+        - id
+        - rentalRequestId
+        - roomId
+        - tenantId
+        - status
+        - desiredMoveInDate
+        - createdAt
+        - room
+        - tenant
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        rentalRequestId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        roomId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        tenantId:
+          type: string
+          format: uuid
+          example: "770e8400-e29b-41d4-a716-446655440002"
+        status:
+          type: string
+          enum: [PENDING, REJECTED]
+          example: "PENDING"
+        desiredMoveInDate:
+          type: string
+          format: date
+          example: "2026-11-20"
+        durationMonths:
+          type:
+            - integer
+            - "null"
+          example: 6
+        message:
+          type:
+            - string
+            - "null"
+          example: "Tôi muốn thuê phòng từ ngày 20/11"
+        rejectionReason:
+          type:
+            - string
+            - "null"
+          example: null
+        reviewedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          example: null
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-14T12:00:00.000Z"
+        room:
+          $ref: '#/components/schemas/RoomDetailDTO'
+        tenant:
+          $ref: '#/components/schemas/TenantSummaryDTO'
+
+    PaginatedRentalRequestsResponse:
+      type: object
+      required:
+        - items
+        - page
+        - pageSize
+        - totalItems
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RentalRequestSummaryItem'
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 10
+        totalItems:
+          type: integer
+          example: 1
+        totalPages:
+          type: integer
+          example: 1
+
+    RejectRentalRequestRequest:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          example: "Phòng trọ hiện đang bảo trì đột xuất, rất tiếc không thể phục vụ bạn lúc này."
+          description: Lý do từ chối yêu cầu thuê (bắt buộc)
+
+    RejectRentalRequestResponse:
+      type: object
+      required:
+        - rentalRequestId
+        - status
+        - rejectionReason
+        - reviewedAt
+      properties:
+        rentalRequestId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d"
+        status:
+          type: string
+          enum: [REJECTED]
+          example: "REJECTED"
+        rejectionReason:
+          type: string
+          example: "Phòng trọ hiện đang bảo trì đột xuất, rất tiếc không thể phục vụ bạn lúc này."
+        reviewedAt:
+          type: string
+          format: date-time
+          example: "2026-11-14T12:30:00.000Z"
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu không hợp lệ"
+        traceId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Dữ liệu gửi lên không đúng định dạng hoặc thiếu trường bắt buộc
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+            errors:
+              reason: ["Lý do từ chối không được để trống"]
+
+    UnauthorizedError:
+      description: Thiếu access token hoặc token không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    ForbiddenError:
+      description: Không có quyền thực hiện thao tác hoặc tài khoản bị khóa
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FORBIDDEN"
+            message: "Bạn không có quyền thực hiện thao tác này"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    NotFoundError:
+      description: Yêu cầu thuê hoặc phòng trọ không tồn tại hoặc không có quyền truy cập
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "RENTAL_REQUEST_NOT_FOUND"
+            message: "Yêu cầu thuê không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    ConflictError:
+      description: Xung đột nghiệp vụ (Trùng yêu cầu PENDING hoặc chuyển trạng thái không hợp lệ)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "DUPLICATE_RENTAL_REQUEST"
+            message: "Bạn đã có một yêu cầu thuê đang chờ duyệt cho phòng này"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    InternalError:
+      description: Lỗi máy chủ không xác định
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
