@@ -105,7 +105,100 @@ Refresh token cũ bị vô hiệu hóa sau khi xoay vòng. Lỗi `401 UNAUTHORIZ
 }
 ```
 
-Lỗi: `401 UNAUTHORIZED` khi thiếu, sai hoặc hết hạn token; `403 ACCOUNT_LOCKED` nếu tài khoản hiện bị khóa; `404 USER_NOT_FOUND` nếu tài khoản đã không còn tồn tại. Middleware phải đọc trạng thái hiện tại từ database để khóa tài khoản có hiệu lực với token đã cấp.
+Lỗi: `401 UNAUTHORIZED` khi thiếu, sai hoặc hết hạn token, hoặc tài khoản đã bị xóa/không còn tồn tại trong DB (mã lỗi: `UNAUTHORIZED`, message: `"Tài khoản không tồn tại hoặc phiên đăng nhập không hợp lệ"`); `403 ACCOUNT_LOCKED` nếu tài khoản hiện không `ACTIVE` (mã lỗi: `ACCOUNT_LOCKED`, message: `"Tài khoản đã bị khóa hoặc chưa kích hoạt"`). Middleware kiểm tra trạng thái hiện hành từ database với token đã cấp.
+
+---
+
+## AUTHZ-01 — Hợp đồng Phân quyền & Kiểm tra Quyền sở hữu (Phase 2: Issues #17, #18, #19)
+
+Tài liệu này xác lập giao ước phân quyền dùng chung đã được Nhóm trưởng phê chuẩn tại [Issue #17](https://github.com/UITRentMate/backend/issues/17#issuecomment-6871306585) để các module Phase 2 (đặc biệt là BE-A triển khai #18 Quản lý lịch hẹn & #19 Yêu cầu thuê phòng) áp dụng thống nhất 100%.
+
+### 1. Phân tầng Middleware (`src/common/middleware/require-role.ts`)
+
+Hệ thống cung cấp 3 middleware chuẩn tại tầng `common`:
+
+1. **`requireAuth`**:
+   - Trích xuất Bearer token từ header `Authorization`.
+   - Xác thực JWT bằng `verifyAccessToken()`.
+   - Gán `res.locals.userId: string`.
+   - Trả `401 UNAUTHORIZED` nếu thiếu hoặc token không hợp lệ.
+
+2. **`requireActiveUser`**:
+   - Chấp nhận mọi user có trạng thái `accountStatus === 'ACTIVE'` bất kể vai trò (`TENANT`, `LANDLORD`, `ADMIN`).
+   - Tự động nạp `currentUser` từ database nếu chưa có và gán vào `res.locals.currentUser`.
+   - Sử dụng cho các route cá nhân chỉ yêu cầu tài khoản hợp lệ (ví dụ: `GET /api/v1/users/me`).
+
+3. **`requireRole(...allowedRoles: ('TENANT' | 'LANDLORD' | 'ADMIN')[])`**:
+   - Đảm bảo user đã xác thực (`res.locals.userId`).
+   - Query DB chỉ chọn các trường tối thiểu: `id`, `role`, `accountStatus`, `fullName` (**tuyệt đối không tải `passwordHash`**).
+   - Kiểm tra `accountStatus === 'ACTIVE'`.
+   - Kiểm tra `allowedRoles.includes(user.role)`.
+   - Gán bản ghi typed vào `res.locals.currentUser` cho các Controller/Service phía sau tái sử dụng.
+
+### 2. Bảng mã lỗi và HTTP Status chuẩn của Middleware
+
+| Tình huống | HTTP Status | Code (`code`) | Message (`message`) |
+| :--- | :---: | :--- | :--- |
+| Thiếu hoặc sai access token | `401` | `UNAUTHORIZED` | `"Cần access token"` hoặc `"Thông tin xác thực không hợp lệ"` |
+| JWT hợp lệ nhưng user không còn trong DB (bị xóa) | `401` | `UNAUTHORIZED` | `"Tài khoản không tồn tại hoặc phiên đăng nhập không hợp lệ"` |
+| User tồn tại nhưng `accountStatus !== 'ACTIVE'` | `403` | `ACCOUNT_LOCKED` | `"Tài khoản đã bị khóa hoặc chưa kích hoạt"` |
+| User có `role` không thuộc `allowedRoles` | `403` | `FORBIDDEN` | `"Bạn không có quyền thực hiện thao tác này"` |
+
+### 3. Quy tắc Kiểm tra Quyền sở hữu (Ownership Scoping & Anti-Enumeration)
+
+Nhằm bảo đảm an toàn dữ liệu và chống tấn công dò quét mã định danh (**ID Enumeration Attack**):
+
+- **Sai vai trò nghiệp vụ** (ví dụ: `TENANT` gọi API quản lý của `LANDLORD`): Middleware chặn ở tầng ngoài, trả **`403 FORBIDDEN`**.
+- **Đúng vai trò nhưng truy cập tài nguyên của người khác** (ví dụ: Chủ trọ A xem khu trọ của Chủ trọ B, Người thuê A xem lịch hẹn của Người thuê B):
+  👉 **Bắt buộc trả về `404 NOT_FOUND`** với mã lỗi đặc thù theo tài nguyên, tuyệt đối không trả `403` để tránh để lộ sự tồn tại của tài nguyên.
+- **Không tin cậy input của client:** Tuyệt đối không dùng `landlordId`, `tenantId`, `userId` từ `req.body`, `req.params` hay `req.query` để xác định quyền. Luôn lấy danh tính từ `res.locals.currentUser.id`.
+- **Vai trò `ADMIN`:** Trong Phase 2, **ADMIN không tự động bypass kiểm tra quyền sở hữu** đối với các tài nguyên cá nhân của Chủ trọ và Người thuê.
+
+#### Bảng mã lỗi Quyền sở hữu theo tài nguyên (404 NOT_FOUND)
+
+| Tài nguyên | Mã lỗi (`code`) | Thông báo chuẩn (`message`) |
+| :--- | :--- | :--- |
+| Khu trọ (Property) | `PROPERTY_NOT_FOUND` | `"Khu trọ không tồn tại hoặc bạn không có quyền truy cập"` |
+| Phòng trọ (Room) | `ROOM_NOT_FOUND` | `"Phòng trọ không tồn tại hoặc bạn không có quyền truy cập"` |
+| Lịch hẹn (Viewing Appointment #18) | `APPOINTMENT_NOT_FOUND` | `"Lịch hẹn không tồn tại hoặc bạn không có quyền truy cập"` |
+| Yêu cầu thuê (Rental Request #19) | `RENTAL_REQUEST_NOT_FOUND` | `"Yêu cầu thuê không tồn tại hoặc bạn không có quyền truy cập"` |
+
+### 4. Mẫu hướng dẫn triển khai cho BE-A (#18 & #19)
+
+Thay vì viết middleware ownership cứng cho từng URL param, BE-A thực hiện kiểm tra quyền sở hữu trực tiếp tại tầng **Service / Repository** bằng cách gán điều kiện truy vấn Prisma:
+
+```typescript
+// Ví dụ trong Service / Repository cho Lịch hẹn (#18):
+import { assertAppointmentFound } from '../../common/ownership';
+import { prisma } from '../../infrastructure/database/prisma';
+
+export async function getAppointmentDetail(appointmentId: string, currentUser: CurrentUser) {
+  // Lọc theo vai trò: LANDLORD lọc theo landlordId của khu trọ; TENANT lọc theo tenantId
+  const where = currentUser.role === 'LANDLORD'
+    ? { id: appointmentId, room: { property: { landlordId: currentUser.id } } }
+    : { id: appointmentId, tenantId: currentUser.id };
+
+  const appointment = await prisma.viewingAppointment.findFirst({ where });
+  assertAppointmentFound(appointment); // Tự động ném 404 APPOINTMENT_NOT_FOUND nếu null
+
+  return appointment;
+}
+```
+
+```typescript
+// Ví dụ trong Route:
+import { Router } from 'express';
+import { requireAuth } from '../../common/require-auth';
+import { requireRole } from '../../common/middleware/require-role';
+
+export const appointmentRoutes = Router();
+appointmentRoutes.get(
+  '/api/v1/appointments/:id',
+  requireAuth,
+  requireRole('TENANT', 'LANDLORD'),
+  appointmentController.getDetail
+);
+```
 
 ## Những điểm phải chốt trước khi merge
 
