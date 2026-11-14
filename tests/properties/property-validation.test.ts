@@ -70,6 +70,50 @@ test('validateCreateProperty rejects invalid amenity UUID', () => {
   );
 });
 
+test('validateCreateProperty deduplicates amenity IDs and normalizes empty coverImageUrl', () => {
+  const validUuid = '550e8400-e29b-41d4-a716-446655440000';
+  const input = {
+    name: 'Khu trọ Hòa Bình',
+    address: '123 Đỗ Xuân Hợp, Q9',
+    coverImageUrl: '   ',
+    amenityIds: [validUuid, validUuid],
+  };
+
+  const result = validateCreateProperty(input);
+  assert.equal(result.coverImageUrl, null);
+  assert.deepEqual(result.amenityIds, [validUuid]);
+});
+
+test('validateUpdateProperty accepts valid update payload and normalizes fields', () => {
+  const validUuid = '550e8400-e29b-41d4-a716-446655440000';
+  const input = {
+    name: 'Khu trọ Hòa Bình Cập Nhật',
+    address: '456 Đỗ Xuân Hợp, Q9',
+    houseRules: 'Nội quy mới',
+    coverImageUrl: '',
+    amenityIds: [validUuid, validUuid],
+  };
+
+  const result = validateUpdateProperty(input);
+  assert.equal(result.name, 'Khu trọ Hòa Bình Cập Nhật');
+  assert.equal(result.address, '456 Đỗ Xuân Hợp, Q9');
+  assert.equal(result.houseRules, 'Nội quy mới');
+  assert.equal(result.coverImageUrl, null);
+  assert.deepEqual(result.amenityIds, [validUuid]);
+});
+
+test('validateUpdateProperty rejects missing name or address', () => {
+  assert.throws(
+    () => validateUpdateProperty({ name: '   ', address: '' }),
+    (err: any) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.statusCode, 400);
+      assert.equal(err.code, 'VALIDATION_ERROR');
+      return true;
+    },
+  );
+});
+
 test('validatePropertyListQuery normalizes page and pageSize', () => {
   const result = validatePropertyListQuery({
     page: '-1',

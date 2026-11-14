@@ -206,3 +206,65 @@ test('archiveProperty rejects with 409 CONFLICT if property has RENTED or HELD r
     },
   );
 });
+
+test('updateProperty succeeds when caller is owner and amenities are valid', async () => {
+  stub(PropertyRepository, 'findPropertyById', async () => sampleProperty);
+  stub(PropertyRepository, 'validateAmenityIds', async () => true);
+  stub(PropertyRepository, 'updateProperty', async () => ({
+    ...sampleProperty,
+    name: 'Tên mới cập nhật',
+  }));
+
+  const result = await PropertyService.updateProperty(mockLandlordId, mockPropertyId, {
+    name: 'Tên mới cập nhật',
+    address: 'Địa chỉ',
+    houseRules: null,
+    coverImageUrl: null,
+    amenityIds: [],
+  });
+
+  assert.equal(result.name, 'Tên mới cập nhật');
+});
+
+test('updateProperty rejects with 404 when property belongs to another landlord', async () => {
+  stub(PropertyRepository, 'findPropertyById', async () => sampleProperty);
+
+  await assert.rejects(
+    () =>
+      PropertyService.updateProperty(otherLandlordId, mockPropertyId, {
+        name: 'Tên mới',
+        address: 'Địa chỉ',
+        houseRules: null,
+        coverImageUrl: null,
+        amenityIds: [],
+      }),
+    (err: any) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.statusCode, 404);
+      assert.equal(err.code, 'PROPERTY_NOT_FOUND');
+      return true;
+    },
+  );
+});
+
+test('updateProperty rejects with 400 when amenityIds validation fails', async () => {
+  stub(PropertyRepository, 'findPropertyById', async () => sampleProperty);
+  stub(PropertyRepository, 'validateAmenityIds', async () => false);
+
+  await assert.rejects(
+    () =>
+      PropertyService.updateProperty(mockLandlordId, mockPropertyId, {
+        name: 'Tên mới',
+        address: 'Địa chỉ',
+        houseRules: null,
+        coverImageUrl: null,
+        amenityIds: ['invalid-amenity-id'],
+      }),
+    (err: any) => {
+      assert.ok(err instanceof ApiError);
+      assert.equal(err.statusCode, 400);
+      assert.equal(err.code, 'VALIDATION_ERROR');
+      return true;
+    },
+  );
+});

@@ -212,3 +212,83 @@ test('PATCH /api/v1/landlord/properties/:id/archive archives property when no ac
   assert.equal(response.status, 200);
   assert.equal(body.success, true);
 });
+
+test('GET /api/v1/landlord/properties/:propertyId returns 200 with landlord property detail', async () => {
+  stub(prisma.user, 'findUnique', async () => mockLandlord);
+  stub(prisma.property, 'findUnique', async () => samplePropertyData);
+
+  const { response, body } = await request(`/api/v1/landlord/properties/${mockPropertyId}`, {
+    headers: {
+      Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(body.id, mockPropertyId);
+  assert.equal(body.name, 'Nhà trọ Hưng Thịnh');
+  assert.equal(body.rooms.length, 1);
+  assert.equal(body.stats.vacantRooms, 1);
+});
+
+test('PUT /api/v1/landlord/properties/:propertyId updates property details and amenities', async () => {
+  stub(prisma.user, 'findUnique', async () => mockLandlord);
+  stub(prisma.property, 'findUnique', async () => samplePropertyData);
+  stub(prisma.amenity, 'count', async () => 0);
+  stub(prisma, '$transaction', async (cb: any) => {
+    return cb({
+      propertyAmenity: {
+        deleteMany: async () => ({ count: 0 }),
+        createMany: async () => ({ count: 0 }),
+      },
+      property: {
+        update: async () => ({ id: mockPropertyId }),
+        findUniqueOrThrow: async () => ({
+          ...samplePropertyData,
+          name: 'Nhà trọ Hưng Thịnh Đã Cập Nhật',
+        }),
+      },
+    });
+  });
+
+  const { response, body } = await request(`/api/v1/landlord/properties/${mockPropertyId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+    },
+    body: JSON.stringify({
+      name: 'Nhà trọ Hưng Thịnh Đã Cập Nhật',
+      address: '123 Đỗ Xuân Hợp',
+      houseRules: 'Giờ giấc tự do',
+      coverImageUrl: '',
+      amenityIds: [],
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(body.id, mockPropertyId);
+  assert.equal(body.name, 'Nhà trọ Hưng Thịnh Đã Cập Nhật');
+});
+
+test('PUT /api/v1/landlord/properties/:propertyId returns 404 when property belongs to another landlord', async () => {
+  stub(prisma.user, 'findUnique', async () => mockLandlord);
+  stub(prisma.property, 'findUnique', async () => ({
+    ...samplePropertyData,
+    landlordId: 'different-landlord-uuid',
+  }));
+
+  const { response, body } = await request(`/api/v1/landlord/properties/${mockPropertyId}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+    },
+    body: JSON.stringify({
+      name: 'Nhà trọ Hưng Thịnh',
+      address: '123 Đỗ Xuân Hợp',
+    }),
+  });
+
+  assert.equal(response.status, 404);
+  assert.equal(body.code, 'PROPERTY_NOT_FOUND');
+});

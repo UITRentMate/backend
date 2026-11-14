@@ -14,14 +14,15 @@ export class PropertyRepository {
   public static async validateAmenityIds(amenityIds: string[]): Promise<boolean> {
     if (!amenityIds || amenityIds.length === 0) return true;
 
+    const uniqueIds = Array.from(new Set(amenityIds));
     const count = await prisma.amenity.count({
       where: {
-        id: { in: amenityIds },
+        id: { in: uniqueIds },
         scope: { not: 'ROOM' },
       },
     });
 
-    return count === amenityIds.length;
+    return count === uniqueIds.length;
   }
 
   /**
@@ -41,11 +42,13 @@ export class PropertyRepository {
       });
 
       if (data.amenityIds && data.amenityIds.length > 0) {
+        const uniqueIds = Array.from(new Set(data.amenityIds));
         await tx.propertyAmenity.createMany({
-          data: data.amenityIds.map((amenityId) => ({
+          data: uniqueIds.map((amenityId) => ({
             propertyId: property.id,
             amenityId,
           })),
+          skipDuplicates: true,
         });
       }
 
@@ -90,7 +93,7 @@ export class PropertyRepository {
         where,
         skip: (query.page - 1) * query.pageSize,
         take: query.pageSize,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
         include: {
           propertyAmenities: {
             include: { amenity: true },
@@ -145,11 +148,13 @@ export class PropertyRepository {
       });
 
       if (data.amenityIds && data.amenityIds.length > 0) {
+        const uniqueIds = Array.from(new Set(data.amenityIds));
         await tx.propertyAmenity.createMany({
-          data: data.amenityIds.map((amenityId) => ({
+          data: uniqueIds.map((amenityId) => ({
             propertyId,
             amenityId,
           })),
+          skipDuplicates: true,
         });
       }
 
@@ -194,12 +199,12 @@ export class PropertyRepository {
    * Tính toán thống kê phòng trọ của 1 khu trọ
    */
   public static calculateRoomStats(rooms: Array<{ occupancyStatus: string; isArchived?: boolean }>): LandlordPropertyStatsDTO {
+    const activeRooms = rooms.filter((r) => !r.isArchived);
     let vacantRooms = 0;
     let occupiedRooms = 0;
     let maintenanceRooms = 0;
 
-    for (const room of rooms) {
-      if (room.isArchived) continue;
+    for (const room of activeRooms) {
       if (room.occupancyStatus === 'VACANT') {
         vacantRooms++;
       } else if (room.occupancyStatus === 'MAINTENANCE') {
@@ -210,7 +215,7 @@ export class PropertyRepository {
     }
 
     return {
-      totalRooms: rooms.length,
+      totalRooms: activeRooms.length,
       vacantRooms,
       occupiedRooms,
       maintenanceRooms,

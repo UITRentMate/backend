@@ -28,16 +28,16 @@ const createPropertySchema = z
       .optional()
       .transform((val) => (val && val.length > 0 ? val : null)),
     coverImageUrl: z
-      .string()
-      .trim()
-      .url('Đường dẫn ảnh bìa không hợp lệ')
-      .nullable()
-      .optional()
+      .preprocess(
+        (val) => (typeof val === 'string' && val.trim() === '' ? null : val),
+        z.string().trim().url('Đường dẫn ảnh bìa không hợp lệ').nullable().optional(),
+      )
       .transform((val) => (val && val.length > 0 ? val : null)),
     amenityIds: z
       .array(z.string().regex(UUID_REGEX, 'Mã tiện ích phải là UUID hợp lệ'))
       .optional()
-      .default([]),
+      .default([])
+      .transform((ids) => Array.from(new Set(ids))),
   })
   .strict();
 
@@ -61,16 +61,16 @@ const updatePropertySchema = z
       .optional()
       .transform((val) => (val && val.length > 0 ? val : null)),
     coverImageUrl: z
-      .string()
-      .trim()
-      .url('Đường dẫn ảnh bìa không hợp lệ')
-      .nullable()
-      .optional()
+      .preprocess(
+        (val) => (typeof val === 'string' && val.trim() === '' ? null : val),
+        z.string().trim().url('Đường dẫn ảnh bìa không hợp lệ').nullable().optional(),
+      )
       .transform((val) => (val && val.length > 0 ? val : null)),
     amenityIds: z
       .array(z.string().regex(UUID_REGEX, 'Mã tiện ích phải là UUID hợp lệ'))
       .optional()
-      .default([]),
+      .default([])
+      .transform((ids) => Array.from(new Set(ids))),
   })
   .strict();
 
