@@ -327,6 +327,7 @@ export class ViewingAppointmentService {
     const updated = await ViewingAppointmentRepository.cancelAppointment(
       appointmentId,
       input.reason,
+      appointment.status as typeof VIEWING_STATUS.PENDING | typeof VIEWING_STATUS.CONFIRMED,
     );
 
     return {

@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { ApiError } from '../../common/errors/api-error';
 import { ViewingAppointmentService } from './viewing-appointment.service';
 import {
   validateCreateViewingAppointment,
@@ -9,6 +10,13 @@ import {
   validateViewingAppointmentListQuery,
 } from './viewing-appointment.validation';
 
+function requireCurrentUser(res: Response) {
+  const user = res.locals.currentUser;
+  if (!user) {
+    throw new ApiError(401, 'UNAUTHORIZED', 'Tài khoản không tồn tại hoặc phiên đăng nhập không hợp lệ');
+  }
+  return user;
+}
 export class ViewingAppointmentController {
   /**
    * POST /api/v1/viewing-appointments (VIEW-01)
@@ -37,10 +45,7 @@ export class ViewingAppointmentController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const user = res.locals.currentUser ?? {
-        id: res.locals.userId as string,
-        role: 'TENANT',
-      };
+      const user = requireCurrentUser(res);
       const query = validateViewingAppointmentListQuery(req.query);
       const result = await ViewingAppointmentService.getAppointmentList(user, query);
       res.status(200).json(result);
@@ -58,10 +63,7 @@ export class ViewingAppointmentController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const user = res.locals.currentUser ?? {
-        id: res.locals.userId as string,
-        role: 'TENANT',
-      };
+      const user = requireCurrentUser(res);
       const appointmentId = validateAppointmentId(req.params.appointmentId);
       const result = await ViewingAppointmentService.getAppointmentDetail(user, appointmentId);
       res.status(200).json(result);
@@ -125,10 +127,7 @@ export class ViewingAppointmentController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const user = res.locals.currentUser ?? {
-        id: res.locals.userId as string,
-        role: 'TENANT',
-      };
+      const user = requireCurrentUser(res);
       const appointmentId = validateAppointmentId(req.params.appointmentId);
       const input = validateCancelViewingAppointment(req.body);
       const result = await ViewingAppointmentService.cancelAppointment(

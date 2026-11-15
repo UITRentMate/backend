@@ -186,9 +186,7 @@ export class ViewingAppointmentRepository {
         where,
         skip,
         take,
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         include: {
           timeOptions: {
             select: {
@@ -224,112 +222,124 @@ export class ViewingAppointmentRepository {
     appointmentId: string,
     selectedSlotId: string,
   ) {
-    return prisma.$transaction(async (tx) => {
-      const appointment = await tx.viewingAppointment.findUnique({
-        where: { id: appointmentId },
-        include: {
-          timeOptions: true,
-        },
-      });
+    try {
+      return await prisma.$transaction(
+        async (tx) => {
+          const appointment = await tx.viewingAppointment.findUnique({
+            where: { id: appointmentId },
+            include: { timeOptions: true },
+          });
 
-      if (!appointment) {
-        throw new ApiError(404, 'APPOINTMENT_NOT_FOUND', 'Lịch hẹn không tồn tại hoặc bạn không có quyền truy cập');
-      }
+          if (!appointment) {
+            throw new ApiError(404, 'APPOINTMENT_NOT_FOUND', 'Lịch hẹn không tồn tại hoặc bạn không có quyền truy cập');
+          }
+          if (appointment.status !== VIEWING_STATUS.PENDING) {
+            throw new ApiError(409, 'CONFLICT', `Không thể xác nhận lịch hẹn ở trạng thái ${appointment.status}`);
+          }
 
-      if (appointment.status !== VIEWING_STATUS.PENDING) {
-        throw new ApiError(
-          409,
-          'CONFLICT',
-          `Không thể xác nhận lịch hẹn ở trạng thái ${appointment.status}`,
-        );
-      }
+          const chosenSlot = appointment.timeOptions.find((slot) => slot.id === selectedSlotId);
+          if (!chosenSlot) {
+            throw new ApiError(400, 'VALIDATION_ERROR', 'Khung giờ được chọn không thuộc danh sách đề xuất của lịch hẹn này', {
+              selectedSlotId: ['Mã khung giờ không thuộc lịch hẹn này'],
+            });
+          }
 
-      const chosenSlot = appointment.timeOptions.find((slot) => slot.id === selectedSlotId);
-      if (!chosenSlot) {
-        throw new ApiError(400, 'VALIDATION_ERROR', 'Khung giờ được chọn không thuộc danh sách đề xuất của lịch hẹn này', {
-          selectedSlotId: ['Mã khung giờ không thuộc lịch hẹn này'],
-        });
-      }
-
-      const slotStart = chosenSlot.startAt;
-      const durationMs = DEFAULT_VIEWING_DURATION_MINUTES * 60 * 1000;
-
-      // Kiểm tra xung đột với bất kỳ lịch hẹn CONFIRMED nào khác của cùng phòng
-      const conflictingAppointment = await tx.viewingAppointment.findFirst({
-        where: {
-          id: { not: appointmentId },
-          roomId: appointment.roomId,
-          status: VIEWING_STATUS.CONFIRMED,
-          selectedSlot: {
-            startAt: {
-              gt: new Date(slotStart.getTime() - durationMs),
-              lt: new Date(slotStart.getTime() + durationMs),
+          const slotStart = chosenSlot.startAt;
+          const durationMs = DEFAULT_VIEWING_DURATION_MINUTES * 60 * 1000;
+          const conflictingAppointment = await tx.viewingAppointment.findFirst({
+            where: {
+              id: { not: appointmentId },
+              roomId: appointment.roomId,
+              status: VIEWING_STATUS.CONFIRMED,
+              selectedSlot: {
+                startAt: {
+                  gt: new Date(slotStart.getTime() - durationMs),
+                  lt: new Date(slotStart.getTime() + durationMs),
+                },
+              },
             },
-          },
-        },
-        include: {
-          selectedSlot: true,
-        },
-      });
+            include: { selectedSlot: true },
+          });
 
-      if (conflictingAppointment) {
+          if (conflictingAppointment) {
+            throw new ApiError(
+              409,
+              'SLOT_CONFLICT',
+              'Khung giờ này đã bị trùng với một lịch hẹn khác đã xác nhận cho phòng này',
+            );
+          }
+
+          await tx.viewingTimeOption.update({
+            where: { id: selectedSlotId },
+            data: { isSelected: true },
+          });
+
+          return tx.viewingAppointment.update({
+            where: { id: appointmentId },
+            data: { status: VIEWING_STATUS.CONFIRMED, selectedSlotId },
+            include: {
+              selectedSlot: { select: { id: true, startAt: true } },
+            },
+          });
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') {
+        const current = await prisma.viewingAppointment.findUnique({
+          where: { id: appointmentId },
+          select: { status: true },
+        });
+        if (current && current.status !== VIEWING_STATUS.PENDING) {
+          throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã được xử lý bởi một yêu cầu đồng thời khác');
+        }
         throw new ApiError(
           409,
           'SLOT_CONFLICT',
-          'Khung giờ này đã bị trùng với một lịch hẹn khác đã xác nhận cho phòng này',
+          'Khung giờ này vừa được xác nhận cho một lịch hẹn khác của phòng',
         );
       }
-
-      // Đánh dấu slot được chọn
-      await tx.viewingTimeOption.update({
-        where: { id: selectedSlotId },
-        data: { isSelected: true },
-      });
-
-      // Cập nhật trạng thái lịch hẹn
-      const updated = await tx.viewingAppointment.update({
-        where: { id: appointmentId },
-        data: {
-          status: VIEWING_STATUS.CONFIRMED,
-          selectedSlotId,
-        },
-        include: {
-          selectedSlot: {
-            select: {
-              id: true,
-              startAt: true,
-            },
-          },
-        },
-      });
-
-      return updated;
-    });
+      throw error;
+    }
   }
 
   /**
    * Cập nhật trạng thái từ chối lịch hẹn
    */
   public static async rejectAppointment(appointmentId: string, reason: string) {
-    return prisma.viewingAppointment.update({
-      where: { id: appointmentId },
+    const result = await prisma.viewingAppointment.updateMany({
+      where: { id: appointmentId, status: VIEWING_STATUS.PENDING },
       data: {
         status: VIEWING_STATUS.REJECTED,
         rejectionReason: reason,
       },
     });
+
+    if (result.count === 0) {
+      throw new ApiError(409, 'CONFLICT', 'Lịch hẹn không còn ở trạng thái PENDING để từ chối');
+    }
+    return { id: appointmentId };
   }
 
   /**
-   * Cập nhật trạng thái hủy lịch hẹn
+   * Cập nhật trạng thái hủy lịch hẹn nếu trạng thái vẫn khớp với lần kiểm tra của service
    */
-  public static async cancelAppointment(appointmentId: string, reason: string) {
-    return prisma.viewingAppointment.update({
-      where: { id: appointmentId },
+  public static async cancelAppointment(
+    appointmentId: string,
+    reason: string,
+    expectedStatus: typeof VIEWING_STATUS.PENDING | typeof VIEWING_STATUS.CONFIRMED,
+  ) {
+    const result = await prisma.viewingAppointment.updateMany({
+      where: { id: appointmentId, status: expectedStatus },
       data: {
         status: VIEWING_STATUS.CANCELLED,
         cancellationReason: reason,
       },
     });
+
+    if (result.count === 0) {
+      throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã được xử lý bởi một yêu cầu đồng thời khác');
+    }
+    return { id: appointmentId };
   }
 }
