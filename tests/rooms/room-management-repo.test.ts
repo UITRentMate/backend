@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
+import { ApiError } from '../../src/common/errors/api-error';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { RoomManagementRepository } from '../../src/modules/rooms/room-management.repository';
 import type { CreateRoomInput, UpdateRoomInput } from '../../src/modules/rooms/room-management.types';
@@ -149,6 +150,36 @@ describe('RoomManagementRepository Unit Tests', () => {
   });
 
   describe('createRoomTransaction', () => {
+    test('ném lỗi 409 DUPLICATE_ROOM_CODE khi phát hiện trùng mã phòng trong transaction', async () => {
+      const mockTx: any = {
+        room: {
+          count: async () => 1,
+        },
+      };
+
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      const input: CreateRoomInput = {
+        roomCode: 'P.301',
+        areaM2: 28.5,
+        maxOccupants: 2,
+        monthlyRent: 4500000,
+        depositRequired: 4500000,
+        electricityRate: 3800,
+        waterRate: 25000,
+      };
+
+      await assert.rejects(
+        () => RoomManagementRepository.createRoomTransaction(mockPropertyId, input),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'DUPLICATE_ROOM_CODE');
+          return true;
+        },
+      );
+    });
+
     test('tạo phòng với các giá trị mặc định VACANT, HIDDEN và các quan hệ trong transaction', async () => {
       let createdRoomData: any = null;
       let createdAmenitiesData: any = null;
@@ -156,6 +187,7 @@ describe('RoomManagementRepository Unit Tests', () => {
 
       const mockTx: any = {
         room: {
+          count: async () => 0,
           create: async ({ data }: any) => {
             createdRoomData = data;
             return { id: mockRoomId, ...data };
@@ -217,6 +249,37 @@ describe('RoomManagementRepository Unit Tests', () => {
   });
 
   describe('updateRoomTransaction', () => {
+    test('ném lỗi 409 DUPLICATE_ROOM_CODE khi cập nhật sang mã phòng trùng lặp trong transaction', async () => {
+      const mockTx: any = {
+        room: {
+          findUnique: async () => ({ propertyId: mockPropertyId }),
+          count: async () => 1,
+        },
+      };
+
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      const input: UpdateRoomInput = {
+        roomCode: 'P.302-DUPLICATE',
+        areaM2: 30,
+        maxOccupants: 2,
+        monthlyRent: 5000000,
+        depositRequired: 5000000,
+        electricityRate: 3800,
+        waterRate: 25000,
+      };
+
+      await assert.rejects(
+        () => RoomManagementRepository.updateRoomTransaction(mockRoomId, input),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'DUPLICATE_ROOM_CODE');
+          return true;
+        },
+      );
+    });
+
     test('xóa liên kết cũ và tạo mới liên kết tiện ích, phí dịch vụ (Full Replace)', async () => {
       let deletedAmenityWhere: any = null;
       let deletedFeeWhere: any = null;
@@ -238,6 +301,8 @@ describe('RoomManagementRepository Unit Tests', () => {
           createMany: async ({ data }: any) => ({ count: data.length }),
         },
         room: {
+          findUnique: async () => ({ propertyId: mockPropertyId }),
+          count: async () => 0,
           update: async ({ where, data }: any) => {
             updatedRoomData = data;
             return { id: where.id, ...data };
@@ -348,6 +413,146 @@ describe('RoomManagementRepository Unit Tests', () => {
       const result = await RoomManagementRepository.findLandlordRoomById(mockRoomId);
       assert.ok(result);
       assert.equal(result?.id, mockRoomId);
+    });
+  });
+
+  describe('transitionToMaintenanceTransaction', () => {
+    test('ném 409 CANNOT_MAINTAIN_ACTIVE_ROOM khi có hợp đồng hiệu lực trong transaction', async () => {
+      const mockTx: any = {
+        contract: { count: async () => 1 },
+        rentalRequest: { count: async () => 0 },
+      };
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      await assert.rejects(
+        () => RoomManagementRepository.transitionToMaintenanceTransaction(mockRoomId),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'CANNOT_MAINTAIN_ACTIVE_ROOM');
+          return true;
+        },
+      );
+    });
+
+    test('ném 409 CANNOT_MAINTAIN_ACTIVE_ROOM khi có yêu cầu thuê đang xử lý trong transaction', async () => {
+      const mockTx: any = {
+        contract: { count: async () => 0 },
+        rentalRequest: { count: async () => 1 },
+      };
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      await assert.rejects(
+        () => RoomManagementRepository.transitionToMaintenanceTransaction(mockRoomId),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'CANNOT_MAINTAIN_ACTIVE_ROOM');
+          return true;
+        },
+      );
+    });
+
+    test('ném 409 INVALID_STATUS_TRANSITION khi phòng không ở trạng thái VACANT (updateMany count = 0)', async () => {
+      const mockTx: any = {
+        contract: { count: async () => 0 },
+        rentalRequest: { count: async () => 0 },
+        room: {
+          updateMany: async () => ({ count: 0 }),
+        },
+      };
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      await assert.rejects(
+        () => RoomManagementRepository.transitionToMaintenanceTransaction(mockRoomId),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'INVALID_STATUS_TRANSITION');
+          return true;
+        },
+      );
+    });
+
+    test('thành công chuyển sang MAINTENANCE và tự động hạ visibilityStatus = HIDDEN', async () => {
+      let updateWhere: any = null;
+      let updateData: any = null;
+
+      const mockTx: any = {
+        contract: { count: async () => 0 },
+        rentalRequest: { count: async () => 0 },
+        room: {
+          updateMany: async ({ where, data }: any) => {
+            updateWhere = where;
+            updateData = data;
+            return { count: 1 };
+          },
+          findUniqueOrThrow: async () => ({
+            id: mockRoomId,
+            occupancyStatus: 'MAINTENANCE',
+            visibilityStatus: 'HIDDEN',
+          }),
+        },
+      };
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      const result = await RoomManagementRepository.transitionToMaintenanceTransaction(mockRoomId);
+
+      assert.equal(updateWhere.id, mockRoomId);
+      assert.equal(updateWhere.occupancyStatus, 'VACANT');
+      assert.equal(updateData.occupancyStatus, 'MAINTENANCE');
+      assert.equal(updateData.visibilityStatus, 'HIDDEN');
+      assert.equal(result.occupancyStatus, 'MAINTENANCE');
+      assert.equal(result.visibilityStatus, 'HIDDEN');
+    });
+  });
+
+  describe('transitionToVacantTransaction', () => {
+    test('ném 409 INVALID_STATUS_TRANSITION khi phòng không ở trạng thái MAINTENANCE (updateMany count = 0)', async () => {
+      const mockTx: any = {
+        room: {
+          updateMany: async () => ({ count: 0 }),
+        },
+      };
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      await assert.rejects(
+        () => RoomManagementRepository.transitionToVacantTransaction(mockRoomId),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'INVALID_STATUS_TRANSITION');
+          return true;
+        },
+      );
+    });
+
+    test('thành công chuyển từ MAINTENANCE về VACANT', async () => {
+      let updateWhere: any = null;
+      let updateData: any = null;
+
+      const mockTx: any = {
+        room: {
+          updateMany: async ({ where, data }: any) => {
+            updateWhere = where;
+            updateData = data;
+            return { count: 1 };
+          },
+          findUniqueOrThrow: async () => ({
+            id: mockRoomId,
+            occupancyStatus: 'VACANT',
+            visibilityStatus: 'HIDDEN',
+          }),
+        },
+      };
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      const result = await RoomManagementRepository.transitionToVacantTransaction(mockRoomId);
+
+      assert.equal(updateWhere.id, mockRoomId);
+      assert.equal(updateWhere.occupancyStatus, 'MAINTENANCE');
+      assert.equal(updateData.occupancyStatus, 'VACANT');
+      assert.equal(result.occupancyStatus, 'VACANT');
     });
   });
 

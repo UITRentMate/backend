@@ -221,6 +221,7 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
       stub(prisma, '$transaction', async (cb: any) => {
         return cb({
           room: {
+            count: async () => 0,
             create: async () => ({ id: mockRoomId }),
             findUniqueOrThrow: async () => sampleRoomData,
           },
@@ -369,6 +370,8 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
             createMany: async () => ({ count: 1 }),
           },
           room: {
+            findUnique: async () => ({ propertyId: mockPropertyId }),
+            count: async () => 0,
             update: async () => ({ id: mockRoomId }),
             findUniqueOrThrow: async () => ({
               ...sampleRoomData,
@@ -427,11 +430,64 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
       assert.equal(body.code, 'INVALID_STATUS_TRANSITION');
     });
 
-    test('trả về 409 Conflict khi chuyển MAINTENANCE nhưng phòng có hợp đồng hiệu lực', async () => {
+    test('trả về 409 Conflict khi phòng hiện tại là RENTED cố tình chuyển sang VACANT', async () => {
       stub(prisma.user, 'findUnique', async () => mockLandlord);
-      stub(prisma.room, 'findUnique', async () => sampleRoomData);
-      stub(prisma.contract, 'count', async () => 1);
-      stub(prisma.rentalRequest, 'count', async () => 0);
+      stub(prisma.room, 'findUnique', async () => ({
+        ...sampleRoomData,
+        occupancyStatus: 'RENTED',
+      }));
+
+      const { response, body } = await request(
+        `/api/v1/landlord/rooms/${mockRoomId}/operational-status`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+          },
+          body: JSON.stringify({ occupancyStatus: 'VACANT' }),
+        },
+      );
+
+      assert.equal(response.status, 409);
+      assert.equal(body.code, 'INVALID_STATUS_TRANSITION');
+    });
+
+    test('trả về 409 Conflict khi phòng hiện tại là HELD cố tình chuyển sang MAINTENANCE', async () => {
+      stub(prisma.user, 'findUnique', async () => mockLandlord);
+      stub(prisma.room, 'findUnique', async () => ({
+        ...sampleRoomData,
+        occupancyStatus: 'HELD',
+      }));
+
+      const { response, body } = await request(
+        `/api/v1/landlord/rooms/${mockRoomId}/operational-status`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+          },
+          body: JSON.stringify({ occupancyStatus: 'MAINTENANCE' }),
+        },
+      );
+
+      assert.equal(response.status, 409);
+      assert.equal(body.code, 'INVALID_STATUS_TRANSITION');
+    });
+
+    test('trả về 409 Conflict khi chuyển MAINTENANCE nhưng phòng có hợp đồng hiệu lực trong transaction', async () => {
+      stub(prisma.user, 'findUnique', async () => mockLandlord);
+      stub(prisma.room, 'findUnique', async () => ({
+        ...sampleRoomData,
+        occupancyStatus: 'VACANT',
+      }));
+      stub(prisma, '$transaction', async (cb: any) => {
+        return cb({
+          contract: { count: async () => 1 },
+          rentalRequest: { count: async () => 0 },
+        });
+      });
 
       const { response, body } = await request(
         `/api/v1/landlord/rooms/${mockRoomId}/operational-status`,
@@ -449,19 +505,27 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
       assert.equal(body.code, 'CANNOT_MAINTAIN_ACTIVE_ROOM');
     });
 
-    test('trả về 200 OK khi chuyển sang MAINTENANCE (tự động hạ visibilityStatus về HIDDEN)', async () => {
+    test('trả về 200 OK khi chuyển sang MAINTENANCE (tự động hạ visibilityStatus về HIDDEN trong transaction)', async () => {
       stub(prisma.user, 'findUnique', async () => mockLandlord);
       stub(prisma.room, 'findUnique', async () => ({
         ...sampleRoomData,
+        occupancyStatus: 'VACANT',
         visibilityStatus: 'VISIBLE',
       }));
-      stub(prisma.contract, 'count', async () => 0);
-      stub(prisma.rentalRequest, 'count', async () => 0);
-      stub(prisma.room, 'update', async () => ({
-        ...sampleRoomData,
-        occupancyStatus: 'MAINTENANCE',
-        visibilityStatus: 'HIDDEN',
-      }));
+      stub(prisma, '$transaction', async (cb: any) => {
+        return cb({
+          contract: { count: async () => 0 },
+          rentalRequest: { count: async () => 0 },
+          room: {
+            updateMany: async () => ({ count: 1 }),
+            findUniqueOrThrow: async () => ({
+              ...sampleRoomData,
+              occupancyStatus: 'MAINTENANCE',
+              visibilityStatus: 'HIDDEN',
+            }),
+          },
+        });
+      });
 
       const { response, body } = await request(
         `/api/v1/landlord/rooms/${mockRoomId}/operational-status`,
@@ -477,6 +541,43 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
 
       assert.equal(response.status, 200);
       assert.equal(body.occupancyStatus, 'MAINTENANCE');
+      assert.equal(body.visibilityStatus, 'HIDDEN');
+    });
+
+    test('trả về 200 OK khi chuyển từ MAINTENANCE về VACANT trong transaction', async () => {
+      stub(prisma.user, 'findUnique', async () => mockLandlord);
+      stub(prisma.room, 'findUnique', async () => ({
+        ...sampleRoomData,
+        occupancyStatus: 'MAINTENANCE',
+        visibilityStatus: 'HIDDEN',
+      }));
+      stub(prisma, '$transaction', async (cb: any) => {
+        return cb({
+          room: {
+            updateMany: async () => ({ count: 1 }),
+            findUniqueOrThrow: async () => ({
+              ...sampleRoomData,
+              occupancyStatus: 'VACANT',
+              visibilityStatus: 'HIDDEN',
+            }),
+          },
+        });
+      });
+
+      const { response, body } = await request(
+        `/api/v1/landlord/rooms/${mockRoomId}/operational-status`,
+        {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+          },
+          body: JSON.stringify({ occupancyStatus: 'VACANT' }),
+        },
+      );
+
+      assert.equal(response.status, 200);
+      assert.equal(body.occupancyStatus, 'VACANT');
       assert.equal(body.visibilityStatus, 'HIDDEN');
     });
   });

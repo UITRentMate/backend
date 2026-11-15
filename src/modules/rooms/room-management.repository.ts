@@ -1,4 +1,5 @@
 import type { Prisma } from '@prisma/client';
+import { ApiError } from '../../common/errors/api-error';
 import { prisma } from '../../infrastructure/database/prisma';
 import type {
   CreateRoomInput,
@@ -6,6 +7,26 @@ import type {
   LandlordRoomListQuery,
   RoomStatusSummary,
 } from './room-management.types';
+
+const ROOM_DETAIL_INCLUDE: Prisma.RoomInclude = {
+  roomAmenities: {
+    include: { amenity: true },
+  },
+  serviceFees: {
+    orderBy: { feeName: 'asc' },
+  },
+  images: {
+    orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
+  },
+  property: {
+    select: {
+      id: true,
+      name: true,
+      address: true,
+      status: true,
+    },
+  },
+};
 
 export class RoomManagementRepository {
   /**
@@ -112,6 +133,24 @@ export class RoomManagementRepository {
    */
   public static async createRoomTransaction(propertyId: string, data: CreateRoomInput) {
     return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // Kiểm tra trùng lặp mã phòng trong transaction để bảo vệ tính duy nhất khi có concurrent requests
+      const duplicateCount = await tx.room.count({
+        where: {
+          propertyId,
+          roomCode: {
+            equals: data.roomCode.trim(),
+            mode: 'insensitive',
+          },
+        },
+      });
+      if (duplicateCount > 0) {
+        throw new ApiError(
+          409,
+          'DUPLICATE_ROOM_CODE',
+          `Mã phòng '${data.roomCode}' đã tồn tại trong khu trọ này`,
+        );
+      }
+
       const room = await tx.room.create({
         data: {
           propertyId,
@@ -181,7 +220,32 @@ export class RoomManagementRepository {
    */
   public static async updateRoomTransaction(roomId: string, data: UpdateRoomInput) {
     return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      // 1. Xóa các tiện ích và phí dịch vụ cũ
+      // 1. Kiểm tra trùng lặp mã phòng trong transaction nếu có cập nhật roomCode
+      const currentRoom = await tx.room.findUnique({
+        where: { id: roomId },
+        select: { propertyId: true },
+      });
+      if (currentRoom) {
+        const duplicateCount = await tx.room.count({
+          where: {
+            propertyId: currentRoom.propertyId,
+            roomCode: {
+              equals: data.roomCode.trim(),
+              mode: 'insensitive',
+            },
+            id: { not: roomId },
+          },
+        });
+        if (duplicateCount > 0) {
+          throw new ApiError(
+            409,
+            'DUPLICATE_ROOM_CODE',
+            `Mã phòng '${data.roomCode}' đã tồn tại trong khu trọ này`,
+          );
+        }
+      }
+
+      // 2. Xóa các tiện ích và phí dịch vụ cũ
       await tx.roomAmenity.deleteMany({
         where: { roomId },
       });
@@ -189,7 +253,7 @@ export class RoomManagementRepository {
         where: { roomId },
       });
 
-      // 2. Tạo mới danh mục tiện ích
+      // 3. Tạo mới danh mục tiện ích
       if (data.amenityIds && data.amenityIds.length > 0) {
         const uniqueAmenityIds = Array.from(new Set(data.amenityIds));
         await tx.roomAmenity.createMany({
@@ -201,7 +265,7 @@ export class RoomManagementRepository {
         });
       }
 
-      // 3. Tạo mới danh mục phí dịch vụ
+      // 4. Tạo mới danh mục phí dịch vụ
       if (data.serviceFees && data.serviceFees.length > 0) {
         await tx.roomServiceFee.createMany({
           data: data.serviceFees.map((fee) => ({
@@ -213,7 +277,7 @@ export class RoomManagementRepository {
         });
       }
 
-      // 4. Cập nhật thông số phòng
+      // 5. Cập nhật thông số phòng
       await tx.room.update({
         where: { id: roomId },
         data: {
@@ -228,28 +292,10 @@ export class RoomManagementRepository {
         },
       });
 
-      // 5. Trả về thông tin phòng chi tiết sau cập nhật
+      // 6. Trả về thông tin phòng chi tiết sau cập nhật
       return tx.room.findUniqueOrThrow({
         where: { id: roomId },
-        include: {
-          roomAmenities: {
-            include: { amenity: true },
-          },
-          serviceFees: {
-            orderBy: { feeName: 'asc' },
-          },
-          images: {
-            orderBy: [{ sortOrder: 'asc' }, { id: 'asc' }],
-          },
-          property: {
-            select: {
-              id: true,
-              name: true,
-              address: true,
-              status: true,
-            },
-          },
-        },
+        include: ROOM_DETAIL_INCLUDE,
       });
     });
   }
@@ -352,6 +398,97 @@ export class RoomManagementRepository {
           },
         },
       },
+    });
+  }
+
+  /**
+   * Chuyển trạng thái vận hành sang MAINTENANCE một cách nguyên tử (Atomic Blocker Check & Status Update)
+   * 1. Kiểm tra nguyên tử không có hợp đồng hiệu lực hoặc yêu cầu thuê đang xử lý.
+   * 2. Cập nhật có điều kiện: chỉ phòng đang VACANT mới được chuyển sang MAINTENANCE.
+   * 3. Tự động hạ visibilityStatus về HIDDEN.
+   */
+  public static async transitionToMaintenanceTransaction(roomId: string) {
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // 1. Kiểm tra nguyên tử các blockers (hợp đồng hiệu lực hoặc yêu cầu thuê đang xử lý)
+      const [activeContractsCount, pendingRequestsCount] = await Promise.all([
+        tx.contract.count({
+          where: {
+            roomId,
+            status: { notIn: ['TERMINATED', 'CANCELLED', 'EXPIRED', 'LIQUIDATED'] },
+          },
+        }),
+        tx.rentalRequest.count({
+          where: {
+            roomId,
+            status: { in: ['PENDING', 'ACCEPTED'] },
+          },
+        }),
+      ]);
+
+      if (activeContractsCount > 0 || pendingRequestsCount > 0) {
+        throw new ApiError(
+          409,
+          'CANNOT_MAINTAIN_ACTIVE_ROOM',
+          'Không thể chuyển sang bảo trì khi phòng đang có hợp đồng hoặc yêu cầu thuê có hiệu lực',
+        );
+      }
+
+      // 2. Cập nhật có điều kiện: chỉ đổi trạng thái nếu phòng đang VACANT
+      const updateResult = await tx.room.updateMany({
+        where: {
+          id: roomId,
+          occupancyStatus: 'VACANT',
+        },
+        data: {
+          occupancyStatus: 'MAINTENANCE',
+          visibilityStatus: 'HIDDEN',
+        },
+      });
+
+      if (updateResult.count === 0) {
+        throw new ApiError(
+          409,
+          'INVALID_STATUS_TRANSITION',
+          'Không thể chuyển sang bảo trì vì trạng thái phòng đã bị thay đổi (yêu cầu phòng ở trạng thái VACANT)',
+        );
+      }
+
+      return tx.room.findUniqueOrThrow({
+        where: { id: roomId },
+        include: ROOM_DETAIL_INCLUDE,
+      });
+    });
+  }
+
+  /**
+   * Chuyển trạng thái vận hành từ MAINTENANCE về VACANT một cách nguyên tử (Conditional Update)
+   * Giữ nguyên visibilityStatus hiện tại.
+   */
+  public static async transitionToVacantTransaction(roomId: string) {
+    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      // Cập nhật có điều kiện: chỉ phòng đang MAINTENANCE mới được chuyển về VACANT
+      const updateResult = await tx.room.updateMany({
+        where: {
+          id: roomId,
+          occupancyStatus: 'MAINTENANCE',
+        },
+        data: {
+          occupancyStatus: 'VACANT',
+        },
+      });
+
+      if (updateResult.count === 0) {
+        throw new ApiError(
+          409,
+          'INVALID_STATUS_TRANSITION',
+          'Không thể chuyển về VACANT vì trạng thái phòng đã bị thay đổi (yêu cầu phòng ở trạng thái MAINTENANCE)',
+        );
+      }
+
+      return tx.room.findUniqueOrThrow({
+        where: { id: roomId },
+        include: ROOM_DETAIL_INCLUDE,
+      });
     });
   }
 

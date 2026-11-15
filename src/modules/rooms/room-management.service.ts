@@ -278,9 +278,15 @@ export class RoomManagementService {
       );
     }
 
+    const currentStatus = room.occupancyStatus;
     const targetStatus = input.occupancyStatus;
 
-    // 2. Cấm chuyển sang HELD hoặc RENTED (hệ thống từ chối với 409 Conflict)
+    // 2. Nếu trạng thái mục tiêu giống trạng thái hiện tại -> Idempotent, trả về thông tin phòng hiện tại
+    if (currentStatus === targetStatus) {
+      return mapToLandlordRoomDetail(room);
+    }
+
+    // 3. Cấm chuyển sang HELD hoặc RENTED (hệ thống từ chối với 409 Conflict)
     if ((targetStatus as string) === 'HELD' || (targetStatus as string) === 'RENTED') {
       throw new ApiError(
         409,
@@ -289,34 +295,53 @@ export class RoomManagementService {
       );
     }
 
-    // 3. Xử lý chuyển sang MAINTENANCE
+    // 4. Ràng buộc nghiêm ngặt State Machine (§3.1):
+    // Chủ trọ chỉ được phép chuyển đổi hai chiều giữa VACANT <-> MAINTENANCE.
+    // Phòng đang RENTED hoặc HELD không được phép chuyển đổi thủ công
+    if (currentStatus === 'HELD' || currentStatus === 'RENTED') {
+      throw new ApiError(
+        409,
+        'INVALID_STATUS_TRANSITION',
+        `Không thể chuyển đổi trạng thái thủ công khi phòng đang ở trạng thái ${currentStatus}`,
+      );
+    }
+
+    // 5. Xử lý chuyển sang MAINTENANCE (chỉ được phép khi phòng đang VACANT)
     if (targetStatus === 'MAINTENANCE') {
-      // Chặn cứng: Kiểm tra hợp đồng hiệu lực hoặc yêu cầu thuê đang xử lý
-      const hasActiveContractsOrRequests =
-        await RoomManagementRepository.checkActiveContractsOrRequests(roomId);
-      if (hasActiveContractsOrRequests) {
+      if (currentStatus !== 'VACANT') {
         throw new ApiError(
           409,
-          'CANNOT_MAINTAIN_ACTIVE_ROOM',
-          'Không thể chuyển sang bảo trì khi phòng đang có hợp đồng hoặc yêu cầu thuê có hiệu lực',
+          'INVALID_STATUS_TRANSITION',
+          'Chỉ có thể chuyển sang bảo trì từ phòng còn trống (VACANT)',
         );
       }
 
-      // Side-effect: Tự động hạ visibilityStatus về HIDDEN
-      const updatedRoom = await RoomManagementRepository.updateOperationalStatus(
-        roomId,
-        'MAINTENANCE',
-        'HIDDEN',
-      );
+      // Thực thi atomic blocker check & status update trong transaction an toàn
+      const updatedRoom =
+        await RoomManagementRepository.transitionToMaintenanceTransaction(roomId);
       return mapToLandlordRoomDetail(updatedRoom);
     }
 
-    // 4. Xử lý chuyển sang VACANT: Cho phép khi hoàn tất bảo trì, giữ nguyên visibilityStatus hiện tại
-    const updatedRoom = await RoomManagementRepository.updateOperationalStatus(
-      roomId,
-      'VACANT',
+    // 6. Xử lý chuyển sang VACANT (chỉ được phép khi hoàn tất bảo trì từ phòng đang MAINTENANCE)
+    if (targetStatus === 'VACANT') {
+      if (currentStatus !== 'MAINTENANCE') {
+        throw new ApiError(
+          409,
+          'INVALID_STATUS_TRANSITION',
+          'Chỉ có thể chuyển về trạng thái VACANT từ phòng đang bảo trì (MAINTENANCE)',
+        );
+      }
+
+      const updatedRoom =
+        await RoomManagementRepository.transitionToVacantTransaction(roomId);
+      return mapToLandlordRoomDetail(updatedRoom);
+    }
+
+    throw new ApiError(
+      409,
+      'INVALID_STATUS_TRANSITION',
+      `Trạng thái mục tiêu ${targetStatus} không hợp lệ`,
     );
-    return mapToLandlordRoomDetail(updatedRoom);
   }
 
   /**
@@ -347,6 +372,7 @@ export class RoomManagementService {
     }
 
     // 3. Bật hiển thị (VISIBLE): Ràng buộc nghiêm ngặt 5 điều kiện Phase 1
+    // Điều kiện 1: Phòng phải còn trống (VACANT)
     if (room.occupancyStatus !== 'VACANT') {
       throw new ApiError(
         409,
@@ -355,6 +381,7 @@ export class RoomManagementService {
       );
     }
 
+    // Điều kiện 2: Phòng chưa bị lưu trữ/xóa mềm
     if (room.isArchived) {
       throw new ApiError(
         409,
@@ -363,6 +390,7 @@ export class RoomManagementService {
       );
     }
 
+    // Điều kiện 3: Khu trọ đang ở trạng thái hoạt động (ACTIVE)
     if (room.property.status !== 'ACTIVE') {
       throw new ApiError(
         409,
@@ -371,6 +399,7 @@ export class RoomManagementService {
       );
     }
 
+    // Điều kiện 4: Tài khoản chủ trọ đang ở trạng thái hoạt động (ACTIVE)
     if (room.property.landlord.accountStatus !== 'ACTIVE') {
       throw new ApiError(
         409,
@@ -378,6 +407,10 @@ export class RoomManagementService {
         'Không thể bật hiển thị phòng khi tài khoản chủ trọ chưa được kích hoạt hoặc đang bị khóa',
       );
     }
+
+    // Điều kiện 5 [DEFERRED - Ghi chú đặc tả §3.2]: Admin áp dụng khóa hiển thị phòng.
+    // Hiện tại schema CSDL (PostgreSQL / Prisma schema Phase 2) chưa có cột adminLock / moderation trên bảng rooms.
+    // Ràng buộc này được ghi nhận DEFERRED và sẽ được kích hoạt khi phát triển Module Quản trị viên (Admin Moderation).
 
     const updatedRoom = await RoomManagementRepository.updateVisibility(
       roomId,

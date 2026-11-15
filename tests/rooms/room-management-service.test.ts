@@ -392,9 +392,58 @@ describe('RoomManagementService Unit Tests', () => {
       }
     });
 
+    test('từ chối chuyển trạng thái khi phòng hiện tại đang là RENTED hoặc HELD với 409 INVALID_STATUS_TRANSITION', async () => {
+      const activeStates = ['RENTED', 'HELD'];
+      const targetStates = ['VACANT', 'MAINTENANCE'];
+
+      for (const currentStatus of activeStates) {
+        stub(RoomManagementRepository, 'findLandlordRoomById', async () => ({
+          ...mockRawRoom,
+          occupancyStatus: currentStatus,
+        }));
+
+        for (const targetStatus of targetStates) {
+          await assert.rejects(
+            () =>
+              RoomManagementService.updateOperationalStatus(mockLandlordId, mockRoomId, {
+                occupancyStatus: targetStatus,
+              }),
+            (err: unknown) => {
+              assert.ok(err instanceof ApiError);
+              assert.equal(err.statusCode, 409);
+              assert.equal(err.code, 'INVALID_STATUS_TRANSITION');
+              return true;
+            },
+          );
+        }
+      }
+    });
+
+    test('từ chối khi phòng hiện tại là VACANT nhưng cố chuyển sang VACANT hoặc trạng thái không phải MAINTENANCE', async () => {
+      stub(RoomManagementRepository, 'findLandlordRoomById', async () => ({
+        ...mockRawRoom,
+        occupancyStatus: 'VACANT',
+      }));
+
+      // Khi targetStatus giống currentStatus (VACANT -> VACANT): Idempotent
+      const result = await RoomManagementService.updateOperationalStatus(mockLandlordId, mockRoomId, {
+        occupancyStatus: 'VACANT',
+      });
+      assert.equal(result.occupancyStatus, 'VACANT');
+    });
+
     test('khi chuyển sang MAINTENANCE: ném 409 CANNOT_MAINTAIN_ACTIVE_ROOM nếu có hợp đồng hoặc yêu cầu thuê hiệu lực', async () => {
-      stub(RoomManagementRepository, 'findLandlordRoomById', async () => mockRawRoom);
-      stub(RoomManagementRepository, 'checkActiveContractsOrRequests', async () => true);
+      stub(RoomManagementRepository, 'findLandlordRoomById', async () => ({
+        ...mockRawRoom,
+        occupancyStatus: 'VACANT',
+      }));
+      stub(RoomManagementRepository, 'transitionToMaintenanceTransaction', async () => {
+        throw new ApiError(
+          409,
+          'CANNOT_MAINTAIN_ACTIVE_ROOM',
+          'Không thể chuyển sang bảo trì khi phòng đang có hợp đồng hoặc yêu cầu thuê có hiệu lực',
+        );
+      });
 
       await assert.rejects(
         () =>
@@ -413,20 +462,18 @@ describe('RoomManagementService Unit Tests', () => {
     test('khi chuyển sang MAINTENANCE: tự động hạ visibilityStatus về HIDDEN', async () => {
       stub(RoomManagementRepository, 'findLandlordRoomById', async () => ({
         ...mockRawRoom,
+        occupancyStatus: 'VACANT',
         visibilityStatus: 'VISIBLE',
       }));
-      stub(RoomManagementRepository, 'checkActiveContractsOrRequests', async () => false);
 
-      let passedNewVisibility: string | undefined = undefined;
       stub(
         RoomManagementRepository,
-        'updateOperationalStatus',
-        async (_id: string, status: string, newVisibility?: string) => {
-          passedNewVisibility = newVisibility;
+        'transitionToMaintenanceTransaction',
+        async (_id: string) => {
           return {
             ...mockRawRoom,
-            occupancyStatus: status,
-            visibilityStatus: newVisibility ?? mockRawRoom.visibilityStatus,
+            occupancyStatus: 'MAINTENANCE',
+            visibilityStatus: 'HIDDEN',
           };
         },
       );
@@ -437,7 +484,6 @@ describe('RoomManagementService Unit Tests', () => {
         { occupancyStatus: 'MAINTENANCE' },
       );
 
-      assert.equal(passedNewVisibility, 'HIDDEN');
       assert.equal(result.occupancyStatus, 'MAINTENANCE');
       assert.equal(result.visibilityStatus, 'HIDDEN');
     });
@@ -451,10 +497,10 @@ describe('RoomManagementService Unit Tests', () => {
 
       stub(
         RoomManagementRepository,
-        'updateOperationalStatus',
-        async (_id: string, status: string) => ({
+        'transitionToVacantTransaction',
+        async (_id: string) => ({
           ...mockRawRoom,
-          occupancyStatus: status,
+          occupancyStatus: 'VACANT',
           visibilityStatus: 'HIDDEN',
         }),
       );
