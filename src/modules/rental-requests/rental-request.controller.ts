@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { ApiError } from '../../common/errors/api-error';
 import { RentalRequestService } from './rental-request.service';
 import {
   validateCreateRentalRequest,
@@ -6,6 +7,14 @@ import {
   validateRentalRequestFilterQuery,
   validateRentalRequestId,
 } from './rental-request.validation';
+
+function requireCurrentUser(res: Response) {
+  const currentUser = res.locals.currentUser;
+  if (!currentUser) {
+    throw new ApiError(401, 'UNAUTHORIZED', 'Cần xác thực người dùng');
+  }
+  return currentUser;
+}
 
 export class RentalRequestController {
   /**
@@ -18,7 +27,7 @@ export class RentalRequestController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const tenantId = res.locals.userId as string;
+      const tenantId = requireCurrentUser(res).id;
       const input = validateCreateRentalRequest(req.body);
       const result = await RentalRequestService.createRentalRequest(tenantId, input);
       res.status(201).json(result);
@@ -37,10 +46,7 @@ export class RentalRequestController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const currentUser = res.locals.currentUser ?? {
-        id: res.locals.userId as string,
-        role: (req as any).user?.role ?? 'TENANT',
-      };
+      const currentUser = requireCurrentUser(res);
       const query = validateRentalRequestFilterQuery(req.query);
       const result = await RentalRequestService.getRentalRequests(currentUser, query);
       res.status(200).json(result);
@@ -59,10 +65,7 @@ export class RentalRequestController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const currentUser = res.locals.currentUser ?? {
-        id: res.locals.userId as string,
-        role: (req as any).user?.role ?? 'TENANT',
-      };
+      const currentUser = requireCurrentUser(res);
       const requestId = validateRentalRequestId(req.params.requestId);
       const result = await RentalRequestService.getRentalRequestDetail(currentUser, requestId);
       res.status(200).json(result);
@@ -81,7 +84,7 @@ export class RentalRequestController {
     next: NextFunction,
   ): Promise<void> {
     try {
-      const landlordId = res.locals.userId as string;
+      const landlordId = requireCurrentUser(res).id;
       const requestId = validateRentalRequestId(req.params.requestId);
       const input = validateRejectRentalRequest(req.body);
       const result = await RentalRequestService.rejectRentalRequest(
