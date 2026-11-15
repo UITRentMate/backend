@@ -21,7 +21,8 @@ export class RoomController {
   }
 
   /**
-   * GET /api/v1/public/rooms/:roomId
+   * GET /api/v1/rooms/:roomId & GET /api/v1/public/rooms/:roomId
+   * Xem chi tiết phòng trọ công khai (đính kèm Deprecation header nếu gọi qua alias /public/rooms/)
    */
   public static async getPublicRoomDetail(
     req: Request,
@@ -29,6 +30,11 @@ export class RoomController {
     next: NextFunction
   ): Promise<void> {
     try {
+      const url = req.originalUrl || req.path || '';
+      if (url.includes('/public/rooms/')) {
+        res.setHeader('Deprecation', 'true');
+      }
+
       const validatedRoomId = validateRoomId(req.params.roomId);
       const result = await RoomService.getPublicRoomDetail(validatedRoomId);
       res.status(200).json(result);
