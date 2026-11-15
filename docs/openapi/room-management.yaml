@@ -1,0 +1,1012 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Room Management API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Quản lý phòng trọ, trạng thái hiển thị và vận hành (BE-P2-02)**.
+    Bao gồm các endpoint nghiệp vụ dành cho Chủ trọ (`LANDLORD`) để tạo, xem, cập nhật, chuyển đổi trạng thái vận hành và kiểm soát hiển thị phòng trọ.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+  - url: https://api.rentmate.vn
+    description: Production API Server
+
+tags:
+  - name: Authentication
+    description: API xác thực, đăng nhập tài khoản để lấy Bearer Access Token dùng cho Swagger.
+  - name: Landlord Rooms
+    description: Các API quản lý phòng trọ dành riêng cho Chủ trọ đã đăng nhập và được cấp quyền LANDLORD.
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags:
+        - Authentication
+      summary: Đăng nhập tài khoản để lấy Access Token
+      description: |
+        Đăng nhập với email hoặc số điện thoại của Chủ trọ để nhận `accessToken` (thời hạn 1 giờ).
+        Sau khi nhận token, bấm nút **Authorize** ở góc trên Swagger để paste token vào.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                  description: Email hoặc số điện thoại
+                  example: "landlord.test@rentmate.vn"
+                password:
+                  type: string
+                  format: password
+                  description: Mật khẩu tài khoản
+                  example: "Password@123"
+      responses:
+        '200':
+          description: Đăng nhập thành công, trả về access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    type: object
+                    properties:
+                      userId:
+                        type: string
+                        format: uuid
+                      fullName:
+                        type: string
+                      role:
+                        type: string
+                        example: "LANDLORD"
+                      status:
+                        type: string
+                        example: "ACTIVE"
+                  accessToken:
+                    type: string
+                    description: JWT Access Token dùng cho BearerAuth
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/landlord/properties/{propertyId}/rooms:
+    post:
+      tags:
+        - Landlord Rooms
+      summary: Tạo mới phòng trọ kèm tiện ích và phí dịch vụ
+      description: |
+        Chủ trọ tạo một căn phòng trọ mới trực thuộc khu trọ thuộc quyền sở hữu của mình.
+        Phòng được khởi tạo với các giá trị mặc định:
+        - `occupancyStatus`: `VACANT` (trống)
+        - `visibilityStatus`: `HIDDEN` (chưa công khai)
+        - `isArchived`: `false` (chưa lưu trữ)
+
+        Đồng thời cho phép khai báo danh mục tiện ích gắn riêng cho phòng (`RoomAmenity`) và danh mục các khoản phí dịch vụ phát sinh hàng tháng (`RoomServiceFee`) trong cùng một database transaction.
+      operationId: createLandlordRoom
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRoomRequest'
+      responses:
+        '201':
+          description: Tạo phòng trọ thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordRoomDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - Landlord Rooms
+      summary: Lấy danh sách phòng thuộc khu trọ kèm phân trang và bộ đếm trạng thái
+      description: |
+        Chủ trọ truy xuất danh sách phòng thuộc khu trọ của mình phục vụ màn hình danh sách phòng quản lý.
+        Endpoint hỗ trợ tìm kiếm theo mã phòng (`roomCode`), lọc theo trạng thái vận hành (`occupancyStatus`), lọc theo trạng thái hiển thị (`visibilityStatus`), kèm phân trang và khối thống kê tổng hợp `summary` (total, vacant, maintenance, rented, held, visible, hidden).
+      operationId: getLandlordRooms
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/PropertyIdParam'
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+          description: Vị trí trang hiện tại
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 50
+          description: Số lượng bản ghi trên một trang
+        - name: search
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Từ khóa tìm kiếm theo mã phòng (roomCode)
+        - name: occupancyStatus
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [VACANT, MAINTENANCE, HELD, RENTED]
+          description: Lọc theo trạng thái vận hành của phòng
+        - name: visibilityStatus
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [VISIBLE, HIDDEN]
+          description: Lọc theo trạng thái hiển thị công khai của phòng
+      responses:
+        '200':
+          description: Danh sách phòng của khu trọ kèm thống kê phân loại
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedLandlordRoomsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/landlord/rooms/{roomId}:
+    get:
+      tags:
+        - Landlord Rooms
+      summary: Lấy chi tiết phòng trọ để quản lý
+      description: |
+        Chủ trọ xem chi tiết toàn diện một căn phòng thuộc quyền sở hữu của mình.
+        Bao gồm toàn bộ thông số diện tích, giá thuê, định mức điện nước, danh mục tiện ích, phí dịch vụ phát sinh, và bộ sưu tập hình ảnh thực tế (kể cả khi phòng đang HIDDEN hoặc MAINTENANCE).
+      operationId: getLandlordRoomDetail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdParam'
+      responses:
+        '200':
+          description: Chi tiết toàn diện phòng trọ quản lý
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordRoomDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    put:
+      tags:
+        - Landlord Rooms
+      summary: Cập nhật thông tin phòng trọ, tiện ích và phí dịch vụ
+      description: |
+        Cập nhật toàn diện thông tin một căn phòng trọ.
+        Áp dụng cơ chế **Full Replace** trong một Database Transaction:
+        - Cập nhật các thông số phòng (roomCode, floor, areaM2, maxOccupants, monthlyRent, depositRequired, electricityRate, waterRate).
+        - Xóa toàn bộ liên kết tiện ích phòng cũ (`RoomAmenity`) và tạo mới theo danh sách `amenityIds`.
+        - Xóa toàn bộ các khoản phí dịch vụ cũ (`RoomServiceFee`) và tạo mới theo danh sách `serviceFees`.
+      operationId: updateLandlordRoom
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoomRequest'
+      responses:
+        '200':
+          description: Cập nhật phòng trọ thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordRoomDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/landlord/rooms/{roomId}/operational-status:
+    patch:
+      tags:
+        - Landlord Rooms
+      summary: Chuyển đổi trạng thái vận hành phòng (VACANT ↔ MAINTENANCE)
+      description: |
+        Chủ trọ điều khiển trạng thái vận hành của phòng theo quy tắc State Machine nghiêm ngặt:
+        - Chủ trọ **chỉ được phép** tự chuyển đổi qua lại giữa `VACANT ↔ MAINTENANCE`.
+        - **Tuyệt đối cấm** chuyển sang `HELD` hoặc `RENTED` (hệ thống sẽ từ chối với mã lỗi `409 Conflict`).
+        - Khi chuyển từ `VACANT` sang `MAINTENANCE`:
+          - Kiểm tra chặn cứng: Không được phép bảo trì nếu phòng đang có hợp đồng hiệu lực (`status IN ('ACTIVE', 'PENDING')`) hoặc yêu cầu thuê đang xử lý (`status IN ('PENDING', 'ACCEPTED')`).
+          - Side-effect: Hệ thống **tự động chuyển trạng thái hiển thị `visibilityStatus` về `HIDDEN`**.
+        - Khi chuyển từ `MAINTENANCE` sang `VACANT`: Cho phép khi hoàn tất bảo trì, giữ nguyên `visibilityStatus = HIDDEN`.
+      operationId: updateRoomOperationalStatus
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateOperationalStatusRequest'
+      responses:
+        '200':
+          description: Chuyển đổi trạng thái vận hành thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordRoomDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/landlord/rooms/{roomId}/visibility:
+    patch:
+      tags:
+        - Landlord Rooms
+      summary: Bật/Tắt hiển thị công khai phòng trọ
+      description: |
+        Chủ trọ điều khiển trạng thái công khai (`visibilityStatus`) của phòng:
+        - `HIDDEN`: Chủ trọ có thể tắt hiển thị bất kỳ lúc nào để tạm ngừng tìm người thuê.
+        - `VISIBLE`: Bắt buộc thỏa mãn đồng thời 5 điều kiện hiển thị công khai (Phase 1):
+          1. `Room.occupancyStatus === 'VACANT'` (Phòng phải đang trống, không thể hiển thị nếu đang bảo trì hoặc đã thuê).
+          2. `Room.isArchived === false` (Phòng chưa bị xóa mềm/lưu trữ).
+          3. `Property.status === 'ACTIVE'` (Khu trọ đang hoạt động).
+          4. `Landlord.accountStatus === 'ACTIVE'` (Tài khoản chủ trọ không bị khóa).
+          5. Phòng không bị Admin áp đặt hạn chế hiển thị.
+        Nếu vi phạm bất kỳ điều kiện nào khi bật `VISIBLE`, hệ thống sẽ từ chối với lỗi `409 Conflict`.
+      operationId: updateRoomVisibility
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVisibilityRequest'
+      responses:
+        '200':
+          description: Cập nhật trạng thái hiển thị công khai thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LandlordRoomDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Access Token cấp qua Authorization header Bearer.
+
+  parameters:
+    PropertyIdParam:
+      name: propertyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Mã UUID định danh của khu trọ.
+      example: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+
+    RoomIdParam:
+      name: roomId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Mã UUID định danh của phòng trọ.
+      example: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+
+  schemas:
+    RoomServiceFeeInput:
+      type: object
+      required:
+        - feeName
+        - monthlyAmount
+      properties:
+        feeName:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: Tên khoản phí dịch vụ phát sinh hàng tháng.
+          example: "Phí vệ sinh & quản lý chung"
+        monthlyAmount:
+          type: number
+          minimum: 0
+          description: Mức phí dịch vụ hàng tháng tính theo VND.
+          example: 150000
+        isRequired:
+          type: boolean
+          default: false
+          description: Khoản phí là bắt buộc hay tùy chọn theo thỏa thuận.
+          example: true
+
+    RoomServiceFeeDTO:
+      type: object
+      required:
+        - id
+        - feeName
+        - monthlyAmount
+        - isRequired
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "d1c2b3a4-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+        feeName:
+          type: string
+          example: "Phí vệ sinh & quản lý chung"
+        monthlyAmount:
+          type: number
+          example: 150000
+        isRequired:
+          type: boolean
+          example: true
+
+    AmenityDTO:
+      type: object
+      required:
+        - id
+        - name
+        - scope
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+        name:
+          type: string
+          example: "Máy lạnh Inverter"
+        scope:
+          type: string
+          enum: [PROPERTY, ROOM, BOTH]
+          example: "ROOM"
+
+    RoomImageDTO:
+      type: object
+      required:
+        - id
+        - imageUrl
+        - sortOrder
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "11111111-2222-4333-8444-555555555555"
+        imageUrl:
+          type: string
+          format: uri
+          example: "https://storage.rentmate.vn/rooms/ag-302-cover.jpg"
+        sortOrder:
+          type: integer
+          example: 0
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-10-30T10:15:30.000Z"
+
+    RoomStatusSummaryDTO:
+      type: object
+      description: Khối thống kê tổng hợp số lượng phòng theo từng trạng thái vận hành và hiển thị.
+      required:
+        - total
+        - vacant
+        - maintenance
+        - rented
+        - held
+        - visible
+        - hidden
+      properties:
+        total:
+          type: integer
+          description: Tổng số phòng trọ thuộc khu trọ (không tính phòng đã xóa mềm/lưu trữ).
+          example: 12
+        vacant:
+          type: integer
+          description: Số phòng đang ở trạng thái VACANT (trống).
+          example: 5
+        maintenance:
+          type: integer
+          description: Số phòng đang ở trạng thái MAINTENANCE (bảo trì).
+          example: 1
+        rented:
+          type: integer
+          description: Số phòng đang ở trạng thái RENTED (đã cho thuê).
+          example: 5
+        held:
+          type: integer
+          description: Số phòng đang ở trạng thái HELD (giữ chỗ/chờ duyệt hợp đồng).
+          example: 1
+        visible:
+          type: integer
+          description: Số phòng đang được bật hiển thị công khai (VISIBLE).
+          example: 4
+        hidden:
+          type: integer
+          description: Số phòng đang ẩn (HIDDEN).
+          example: 8
+
+    CreateRoomRequest:
+      type: object
+      required:
+        - roomCode
+        - areaM2
+        - maxOccupants
+        - monthlyRent
+        - depositRequired
+        - electricityRate
+        - waterRate
+      properties:
+        roomCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Mã định danh phòng do chủ trọ tự đặt (duy nhất trong cùng một khu trọ).
+          example: "P.301"
+        floor:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 200
+          description: Số tầng phòng tọa lạc (tùy chọn).
+          example: 3
+        areaM2:
+          type: number
+          minimum: 1
+          maximum: 1000
+          description: Diện tích sàn phòng tính theo mét vuông (m²).
+          example: 28.5
+        maxOccupants:
+          type: integer
+          minimum: 1
+          maximum: 50
+          description: Sức chứa tối đa số người ở.
+          example: 2
+        monthlyRent:
+          type: number
+          minimum: 0
+          description: Giá thuê cơ bản mỗi tháng (VND).
+          example: 4500000
+        depositRequired:
+          type: number
+          minimum: 0
+          description: Tiền đặt cọc phòng bắt buộc (VND).
+          example: 4500000
+        electricityRate:
+          type: number
+          minimum: 0
+          description: Đơn giá điện sinh hoạt (VND/kWh).
+          example: 3800
+        waterRate:
+          type: number
+          minimum: 0
+          description: Đơn giá nước sinh hoạt (VND/m³ hoặc VND/người/tháng).
+          example: 25000
+        amenityIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Danh sách UUID các tiện ích gắn với phòng (phải thuộc scope ROOM hoặc BOTH).
+          example:
+            - "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+        serviceFees:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomServiceFeeInput'
+          description: Danh mục các khoản phí dịch vụ phát sinh của căn phòng.
+
+    UpdateRoomRequest:
+      type: object
+      required:
+        - roomCode
+        - areaM2
+        - maxOccupants
+        - monthlyRent
+        - depositRequired
+        - electricityRate
+        - waterRate
+      properties:
+        roomCode:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Mã định danh phòng (duy nhất trong cùng khu trọ).
+          example: "P.301-VIP"
+        floor:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+          maximum: 200
+          example: 3
+        areaM2:
+          type: number
+          minimum: 1
+          maximum: 1000
+          example: 30.0
+        maxOccupants:
+          type: integer
+          minimum: 1
+          maximum: 50
+          example: 3
+        monthlyRent:
+          type: number
+          minimum: 0
+          example: 4800000
+        depositRequired:
+          type: number
+          minimum: 0
+          example: 4800000
+        electricityRate:
+          type: number
+          minimum: 0
+          example: 3800
+        waterRate:
+          type: number
+          minimum: 0
+          example: 25000
+        amenityIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Danh sách UUID tiện ích mới (sẽ thay thế toàn bộ danh sách tiện ích cũ của phòng).
+          example:
+            - "e1a2b3c4-d5e6-4f7a-8b9c-0d1e2f3a4b5c"
+        serviceFees:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomServiceFeeInput'
+          description: Danh sách phí dịch vụ mới (sẽ thay thế toàn bộ danh sách phí dịch vụ cũ của phòng).
+
+    UpdateOperationalStatusRequest:
+      type: object
+      required:
+        - occupancyStatus
+      properties:
+        occupancyStatus:
+          type: string
+          enum: [VACANT, MAINTENANCE, HELD, RENTED]
+          description: |
+            Trạng thái vận hành mới của phòng.
+            - Cho phép: `VACANT`, `MAINTENANCE`.
+            - Cấm chuyển bởi chủ trọ (trả về 409 Conflict): `HELD`, `RENTED`.
+          example: "MAINTENANCE"
+
+    UpdateVisibilityRequest:
+      type: object
+      required:
+        - visibilityStatus
+      properties:
+        visibilityStatus:
+          type: string
+          enum: [VISIBLE, HIDDEN]
+          description: |
+            Trạng thái hiển thị công khai mới của phòng.
+            - `VISIBLE`: Bật hiển thị (bắt buộc thỏa mãn 5 điều kiện Phase 1).
+            - `HIDDEN`: Ẩn phòng.
+          example: "VISIBLE"
+
+    LandlordRoomItemDTO:
+      type: object
+      description: Dữ liệu tóm tắt của một phòng trong danh sách quản lý của chủ trọ.
+      required:
+        - id
+        - propertyId
+        - roomCode
+        - areaM2
+        - maxOccupants
+        - monthlyRent
+        - depositRequired
+        - occupancyStatus
+        - visibilityStatus
+        - isArchived
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+        propertyId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+        roomCode:
+          type: string
+          example: "P.301"
+        floor:
+          type:
+            - integer
+            - "null"
+          example: 3
+        areaM2:
+          type: number
+          example: 28.5
+        maxOccupants:
+          type: integer
+          example: 2
+        monthlyRent:
+          type: number
+          example: 4500000
+        depositRequired:
+          type: number
+          example: 4500000
+        electricityRate:
+          type: number
+          example: 3800
+        waterRate:
+          type: number
+          example: 25000
+        occupancyStatus:
+          type: string
+          enum: [VACANT, MAINTENANCE, HELD, RENTED]
+          example: "VACANT"
+        visibilityStatus:
+          type: string
+          enum: [VISIBLE, HIDDEN]
+          example: "HIDDEN"
+        isArchived:
+          type: boolean
+          example: false
+        coverImageUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          example: "https://storage.rentmate.vn/rooms/ag-302-cover.jpg"
+        totalImages:
+          type: integer
+          description: Tổng số lượng hình ảnh của phòng
+          example: 3
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-10-30T10:15:30.000Z"
+
+    LandlordRoomDetailResponse:
+      type: object
+      description: Dữ liệu chi tiết toàn diện phòng trọ phục vụ màn hình quản lý của chủ trọ.
+      required:
+        - id
+        - propertyId
+        - roomCode
+        - areaM2
+        - maxOccupants
+        - monthlyRent
+        - depositRequired
+        - electricityRate
+        - waterRate
+        - occupancyStatus
+        - visibilityStatus
+        - isArchived
+        - amenities
+        - serviceFees
+        - images
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "7b8f9e61-3d2a-4a5b-b1c2-d3e4f5a6b7c8"
+        propertyId:
+          type: string
+          format: uuid
+          example: "a1b2c3d4-e5f6-4a8b-9c0d-1e2f3a4b5c6d"
+        roomCode:
+          type: string
+          example: "P.301"
+        floor:
+          type:
+            - integer
+            - "null"
+          example: 3
+        areaM2:
+          type: number
+          example: 28.5
+        maxOccupants:
+          type: integer
+          example: 2
+        monthlyRent:
+          type: number
+          example: 4500000
+        depositRequired:
+          type: number
+          example: 4500000
+        electricityRate:
+          type: number
+          example: 3800
+        waterRate:
+          type: number
+          example: 25000
+        occupancyStatus:
+          type: string
+          enum: [VACANT, MAINTENANCE, HELD, RENTED]
+          example: "VACANT"
+        visibilityStatus:
+          type: string
+          enum: [VISIBLE, HIDDEN]
+          example: "HIDDEN"
+        isArchived:
+          type: boolean
+          example: false
+        amenities:
+          type: array
+          items:
+            $ref: '#/components/schemas/AmenityDTO'
+        serviceFees:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomServiceFeeDTO'
+        images:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoomImageDTO'
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-10-30T10:15:30.000Z"
+
+    PaginatedLandlordRoomsResponse:
+      type: object
+      description: Dữ liệu phản hồi phân trang danh sách phòng quản lý kèm khối thống kê tổng hợp.
+      required:
+        - items
+        - page
+        - pageSize
+        - totalItems
+        - totalPages
+        - summary
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LandlordRoomItemDTO'
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 10
+        totalItems:
+          type: integer
+          example: 12
+        totalPages:
+          type: integer
+          example: 2
+        summary:
+          $ref: '#/components/schemas/RoomStatusSummaryDTO'
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu không hợp lệ"
+        traceId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Dữ liệu gửi lên không đúng định dạng hoặc thiếu trường bắt buộc (HTTP 400)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+            errors:
+              roomCode: ["Mã phòng không được để trống"]
+
+    Unauthorized:
+      description: Chưa xác thực danh tính qua Bearer Access Token (HTTP 401)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token để truy cập"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Forbidden:
+      description: Tài khoản không có quyền Chủ trọ hoặc bị khóa (HTTP 403)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FORBIDDEN"
+            message: "Bạn không có quyền thực hiện thao tác này"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    NotFound:
+      description: Khu trọ hoặc phòng trọ không tồn tại hoặc không thuộc quyền sở hữu của chủ trọ (HTTP 404)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "NOT_FOUND"
+            message: "Khu trọ hoặc phòng trọ không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Conflict:
+      description: Xung đột nghiệp vụ, trùng mã phòng hoặc vi phạm quy tắc State Machine / Visibility (HTTP 409)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            duplicateRoomCode:
+              summary: Trùng mã phòng trong cùng khu trọ
+              value:
+                success: false
+                code: "DUPLICATE_ROOM_CODE"
+                message: "Mã phòng đã tồn tại trong khu trọ này"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+            invalidStatusTransition:
+              summary: Cấm chuyển sang HELD hoặc RENTED
+              value:
+                success: false
+                code: "INVALID_STATUS_TRANSITION"
+                message: "Chủ trọ chỉ được phép chuyển trạng thái giữa VACANT và MAINTENANCE"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+            activeContractOrRequest:
+              summary: Không thể bảo trì khi đang có hợp đồng hoặc yêu cầu thuê
+              value:
+                success: false
+                code: "ACTIVE_CONTRACT_EXISTS"
+                message: "Không thể chuyển sang bảo trì khi phòng đang có hợp đồng hoặc yêu cầu thuê có hiệu lực"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+            visibilityConditionFailed:
+              summary: Không đủ 5 điều kiện hiển thị
+              value:
+                success: false
+                code: "VISIBILITY_CONDITION_FAILED"
+                message: "Không thể hiển thị phòng khi phòng không ở trạng thái VACANT hoặc khu trọ không hoạt động"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    UnprocessableEntity:
+      description: Vi phạm các ràng buộc dữ liệu logic nghiệp vụ (HTTP 422)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNPROCESSABLE_ENTITY"
+            message: "Yêu cầu vi phạm ràng buộc dữ liệu nghiệp vụ"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    InternalError:
+      description: Lỗi máy chủ nội bộ không xác định (HTTP 500)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống ngoài dự kiến"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
