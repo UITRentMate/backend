@@ -11,10 +11,10 @@ info:
     name: MIT
     url: https://opensource.org/licenses/MIT
 servers:
-  - url: https://api.rentmate.vn
-    description: Production API Server
   - url: http://localhost:5000
     description: Máy chủ phát triển cục bộ (Local Development)
+  - url: https://api.rentmate.vn
+    description: Production API Server
 
 tags:
   - name: Landlord Media Management
