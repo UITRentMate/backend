@@ -558,4 +558,48 @@ export class RoomManagementService {
     const statusCode = uploaded.length === 0 ? 400 : uploaded.length === files.length ? 201 : 200;
     return { statusCode, payload };
   }
+
+  /**
+   * Xóa ảnh phòng trọ an toàn khỏi Database và Cloudinary
+   * Coi Database là nguồn chân lý (Source of Truth): nếu Cloudinary lỗi vẫn trả về 200 OK
+   */
+  public static async deleteRoomImage(
+    landlordId: string,
+    roomId: string,
+    imageId: string,
+  ): Promise<{ success: true; message: string }> {
+    const isOwner = await RoomManagementRepository.checkRoomOwnership(roomId, landlordId);
+    if (!isOwner) {
+      throw new ApiError(
+        404,
+        'ROOM_NOT_FOUND',
+        'Phòng trọ không tồn tại hoặc bạn không có quyền truy cập',
+      );
+    }
+
+    const image = await RoomManagementRepository.findRoomImageById(roomId, imageId);
+    if (!image) {
+      throw new ApiError(
+        404,
+        'IMAGE_NOT_FOUND',
+        'Ảnh không tồn tại trong phòng trọ này',
+      );
+    }
+
+    // Xóa trong DB trước
+    await RoomManagementRepository.deleteRoomImage(imageId);
+
+    // Xóa trên Cloudinary
+    const publicId = extractCloudinaryPublicId(image.imageUrl);
+    if (publicId) {
+      mediaService.deleteResource(publicId).catch((err) => {
+        console.warn(`[RoomManagementService] Failed to delete Cloudinary resource ${publicId}:`, err);
+      });
+    }
+
+    return {
+      success: true,
+      message: 'Xóa ảnh phòng trọ thành công',
+    };
+  }
 }

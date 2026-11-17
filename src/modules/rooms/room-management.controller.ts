@@ -9,6 +9,7 @@ import {
   validateLandlordRoomListQuery,
   validateRoomId,
   validatePropertyId,
+  validateImageId,
 } from './room-management.validation';
 
 export class RoomManagementController {
@@ -159,6 +160,27 @@ export class RoomManagementController {
         files,
       );
       res.status(statusCode).json(payload);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * DELETE /api/v1/landlord/rooms/:roomId/images/:imageId
+   * ROOM-08: Xóa ảnh phòng trọ (P2-03)
+   */
+  public static async deleteRoomImage(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const landlordId = (res.locals.currentUser?.id ?? res.locals.userId) as string;
+      const roomId = validateRoomId(req.params.roomId);
+      const imageId = validateImageId(req.params.imageId);
+
+      const result = await RoomManagementService.deleteRoomImage(landlordId, roomId, imageId);
+      res.status(200).json(result);
     } catch (error) {
       next(error);
     }

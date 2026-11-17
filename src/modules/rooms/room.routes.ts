@@ -72,3 +72,10 @@ roomRouter.post(
   uploadMultipleImages('images', 10),
   RoomManagementController.uploadRoomImages,
 );
+
+// ROOM-08: Xóa ảnh phòng trọ (P2-03)
+roomRouter.delete(
+  '/api/v1/landlord/rooms/:roomId/images/:imageId',
+  requireRole('LANDLORD'),
+  RoomManagementController.deleteRoomImage,
+);
