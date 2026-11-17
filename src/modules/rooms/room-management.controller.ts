@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { ApiError } from '../../common/errors/api-error';
 import { RoomManagementService } from './room-management.service';
 import {
   validateCreateRoom,
@@ -129,6 +130,35 @@ export class RoomManagementController {
       const input = validateUpdateVisibility(req.body);
       const result = await RoomManagementService.updateVisibility(landlordId, roomId, input);
       res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/landlord/rooms/:roomId/images
+   * ROOM-07: Tải bộ ảnh phòng trọ lên Cloudinary với cơ chế Partial Success (P2-03)
+   */
+  public static async uploadRoomImages(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const landlordId = (res.locals.currentUser?.id ?? res.locals.userId) as string;
+      const roomId = validateRoomId(req.params.roomId);
+      const files = req.files as Express.Multer.File[] | undefined;
+
+      if (!files || files.length === 0) {
+        throw new ApiError(400, 'FILES_REQUIRED', 'Vui lòng chọn ít nhất 1 file ảnh để tải lên');
+      }
+
+      const { statusCode, payload } = await RoomManagementService.uploadRoomImages(
+        landlordId,
+        roomId,
+        files,
+      );
+      res.status(statusCode).json(payload);
     } catch (error) {
       next(error);
     }

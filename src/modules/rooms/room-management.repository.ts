@@ -563,4 +563,65 @@ export class RoomManagementRepository {
       },
     });
   }
+
+  /**
+   * Đếm số lượng ảnh hiện có của một phòng trọ
+   */
+  public static async countRoomImages(roomId: string): Promise<number> {
+    return prisma.roomImage.count({
+      where: { roomId },
+    });
+  }
+
+  /**
+   * Lấy giá trị sortOrder lớn nhất hiện có của các ảnh trong phòng
+   * Trả về -1 nếu phòng chưa có ảnh nào
+   */
+  public static async getMaxRoomImageSortOrder(roomId: string): Promise<number> {
+    const aggregate = await prisma.roomImage.aggregate({
+      where: { roomId },
+      _max: { sortOrder: true },
+    });
+    return aggregate._max.sortOrder ?? -1;
+  }
+
+  /**
+   * Tạo bản ghi ảnh phòng trọ mới
+   */
+  public static async createRoomImage(data: {
+    id?: string;
+    roomId: string;
+    imageUrl: string;
+    sortOrder: number;
+  }) {
+    return prisma.roomImage.create({
+      data: {
+        id: data.id,
+        roomId: data.roomId,
+        imageUrl: data.imageUrl,
+        sortOrder: data.sortOrder,
+      },
+    });
+  }
+
+  /**
+   * Tìm ảnh phòng theo id và roomId
+   */
+  public static async findRoomImageById(roomId: string, imageId: string) {
+    return prisma.roomImage.findFirst({
+      where: {
+        id: imageId,
+        roomId,
+      },
+    });
+  }
+
+  /**
+   * Xóa bản ghi ảnh phòng trong Database
+   */
+  public static async deleteRoomImage(imageId: string) {
+    return prisma.roomImage.delete({
+      where: { id: imageId },
+    });
+  }
 }

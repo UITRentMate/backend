@@ -1,5 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { ApiError } from '../../common/errors/api-error';
 import { RoomManagementRepository } from './room-management.repository';
+import {
+  buildRoomImagePublicId,
+  extractCloudinaryPublicId,
+  validateImageBufferMagicBytes,
+} from '../../common/utils/cloudinary.util';
+import { mediaService } from '../media/media.service';
+import type {
+  BatchUploadFailureItem,
+  BatchUploadResponse,
+  BatchUploadSuccessItem,
+} from '../media/media.types';
 import type {
   CreateRoomInput,
   UpdateRoomInput,
@@ -417,5 +429,133 @@ export class RoomManagementService {
       'VISIBLE',
     );
     return mapToLandlordRoomDetail(updatedRoom);
+  }
+
+  /**
+   * Tải bộ ảnh phòng trọ lên Cloudinary với cơ chế Partial Success
+   */
+  public static async uploadRoomImages(
+    landlordId: string,
+    roomId: string,
+    files: Express.Multer.File[],
+  ): Promise<{ statusCode: number; payload: BatchUploadResponse }> {
+    const isOwner = await RoomManagementRepository.checkRoomOwnership(roomId, landlordId);
+    if (!isOwner) {
+      throw new ApiError(
+        404,
+        'ROOM_NOT_FOUND',
+        'Phòng trọ không tồn tại hoặc bạn không có quyền truy cập',
+      );
+    }
+
+    const currentCount = await RoomManagementRepository.countRoomImages(roomId);
+    if (currentCount >= 10) {
+      throw new ApiError(
+        400,
+        'ROOM_IMAGE_LIMIT_EXCEEDED',
+        'Phòng trọ đã đạt giới hạn tối đa 10 ảnh',
+      );
+    }
+
+    const remainingSlots = 10 - currentCount;
+    const filesToProcess = files.slice(0, remainingSlots);
+
+    const uploaded: BatchUploadSuccessItem[] = [];
+    const failed: BatchUploadFailureItem[] = [];
+
+    // Các file vượt quá remainingSlots sẽ bị đánh dấu failed ngay lập tức
+    for (let i = remainingSlots; i < files.length; i++) {
+      failed.push({
+        index: i,
+        originalName: files[i].originalname,
+        size: files[i].size,
+        code: 'ROOM_IMAGE_LIMIT_EXCEEDED',
+        message: 'Vượt quá giới hạn tối đa 10 ảnh của phòng trọ',
+      });
+    }
+
+    let currentSortOrder = await RoomManagementRepository.getMaxRoomImageSortOrder(roomId);
+
+    for (let i = 0; i < filesToProcess.length; i++) {
+      const file = filesToProcess[i];
+
+      // Kiểm tra magic bytes
+      const magicCheck = validateImageBufferMagicBytes(file.buffer);
+      if (!magicCheck.valid) {
+        failed.push({
+          index: i,
+          originalName: file.originalname,
+          size: file.size,
+          code: 'UNSUPPORTED_MEDIA_TYPE',
+          message: 'Định dạng file không hợp lệ hoặc bị giả mạo. Chỉ chấp nhận JPEG, PNG, WebP',
+        });
+        continue;
+      }
+
+      const imageId = randomUUID();
+      const publicId = buildRoomImagePublicId(roomId, imageId);
+
+      // Stream upload lên Cloudinary
+      let uploadResult;
+      try {
+        uploadResult = await mediaService.uploadStream(file.buffer, { publicId });
+      } catch (uploadError: any) {
+        failed.push({
+          index: i,
+          originalName: file.originalname,
+          size: file.size,
+          code: 'CLOUDINARY_UPLOAD_FAILED',
+          message: uploadError?.message || 'Lỗi tải ảnh lên Cloudinary',
+        });
+        continue;
+      }
+
+      // Lưu vào database
+      currentSortOrder++;
+      try {
+        const createdImage = await RoomManagementRepository.createRoomImage({
+          id: imageId,
+          roomId,
+          imageUrl: uploadResult.secureUrl,
+          sortOrder: currentSortOrder,
+        });
+
+        uploaded.push({
+          index: i,
+          originalName: file.originalname,
+          size: file.size,
+          id: createdImage.id,
+          url: createdImage.imageUrl,
+          publicId: uploadResult.publicId,
+          sortOrder: createdImage.sortOrder,
+        });
+      } catch (dbError: any) {
+        // Bù trừ: Xóa ảnh trên Cloudinary nếu DB insert lỗi
+        await mediaService.deleteResource(uploadResult.publicId);
+        currentSortOrder--;
+        failed.push({
+          index: i,
+          originalName: file.originalname,
+          size: file.size,
+          code: 'DB_INSERT_FAILED',
+          message: dbError?.message || 'Lỗi lưu thông tin ảnh vào cơ sở dữ liệu',
+        });
+      }
+    }
+
+    const payload: BatchUploadResponse = {
+      success: uploaded.length > 0,
+      summary: {
+        totalRequested: files.length,
+        succeeded: uploaded.length,
+        failed: failed.length,
+        remainingSlots: Math.max(0, 10 - (currentCount + uploaded.length)),
+      },
+      uploaded,
+      failed,
+    };
+
+    const statusCode = uploaded.length === 0 ? 400 : uploaded.length === files.length ? 201 : 200;
+    return { statusCode, payload };
   }
 }
