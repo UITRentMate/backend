@@ -543,6 +543,8 @@ export class RoomManagementService {
       }
     }
 
+    failed.sort((a, b) => a.index - b.index);
+
     const payload: BatchUploadResponse = {
       success: uploaded.length > 0,
       summary: {

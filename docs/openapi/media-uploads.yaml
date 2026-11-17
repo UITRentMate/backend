@@ -176,6 +176,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiErrorResponse'
+        '413':
+          description: Dung lượng một hoặc nhiều file ảnh vượt quá giới hạn tối đa 5MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
         '500':
           description: Lỗi máy chủ nội bộ
           content:

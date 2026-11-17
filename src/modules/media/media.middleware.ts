@@ -83,11 +83,20 @@ export function uploadMultipleImages(fieldName: string, maxCount: number = 10): 
             return next(new ApiError(413, 'FILE_TOO_LARGE', 'Dung lượng file ảnh vượt quá giới hạn tối đa 5MB'));
           }
           if (err.code === 'LIMIT_UNEXPECTED_FILE') {
+            if (err.field === fieldName) {
+              return next(
+                new ApiError(
+                  400,
+                  'ROOM_IMAGE_LIMIT_EXCEEDED',
+                  `Số lượng file tải lên vượt quá giới hạn tối đa ${maxCount} ảnh trong một lần`
+                )
+              );
+            }
             return next(
               new ApiError(
                 400,
-                'ROOM_IMAGE_LIMIT_EXCEEDED',
-                `Số lượng file tải lên vượt quá giới hạn tối đa ${maxCount} ảnh trong một lần`
+                'INVALID_FILE_UPLOAD',
+                `Tên trường dữ liệu file không hợp lệ: "${err.field}". Yêu cầu tên trường là "${fieldName}"`
               )
             );
           }
