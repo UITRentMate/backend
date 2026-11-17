@@ -1,0 +1,381 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Cloudinary Media Upload & Management API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Tải và quản lý file media công khai qua Cloudinary (BE-P2-03)**.
+    Bao gồm các endpoint tải ảnh bìa khu trọ, tải theo lô bộ ảnh phòng trọ với cơ chế Thành công một phần (Partial Success), và xóa an toàn ảnh phòng trọ.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: https://api.rentmate.vn
+    description: Production API Server
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: Landlord Media Management
+    description: Các API tải và quản lý hình ảnh dành riêng cho Chủ trọ đã đăng nhập và được cấp quyền LANDLORD.
+
+paths:
+  /api/v1/landlord/properties/{propertyId}/cover-image:
+    post:
+      tags:
+        - Landlord Media Management
+      summary: Tải ảnh bìa khu trọ lên Cloudinary
+      description: |
+        Chủ trọ tải lên 1 file ảnh duy nhất làm ảnh bìa cho khu trọ.
+        Hệ thống stream file qua memory buffer lên Cloudinary, tự động nén tối ưu (f_auto, q_auto, w_1920),
+        cập nhật coverImageUrl vào Database, và tự động xóa ảnh bìa cũ trên Cloudinary ở background (nếu có).
+      operationId: uploadPropertyCoverImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: propertyId
+          in: path
+          required: true
+          description: UUID của khu trọ cần tải ảnh bìa
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - coverImage
+              properties:
+                coverImage:
+                  type: string
+                  format: binary
+                  description: File ảnh bìa (định dạng JPEG, PNG hoặc WebP, dung lượng tối đa 5MB)
+      responses:
+        '200':
+          description: Tải ảnh bìa thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PropertyCoverImageResponse'
+        '400':
+          description: Yêu cầu không hợp lệ (thiếu file hoặc định dạng sai)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '401':
+          description: Chưa đăng nhập hoặc token không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '403':
+          description: Không đủ quyền truy cập (chỉ LANDLORD mới được phép)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Khu trọ không tồn tại hoặc không thuộc quyền sở hữu của chủ trọ (Anti-Enumeration)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '413':
+          description: Dung lượng file vượt quá giới hạn tối đa 5MB
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '415':
+          description: Định dạng file không hợp lệ hoặc bị giả mạo (không thỏa mãn magic bytes)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '500':
+          description: Lỗi máy chủ nội bộ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /api/v1/landlord/rooms/{roomId}/images:
+    post:
+      tags:
+        - Landlord Media Management
+      summary: Tải bộ ảnh phòng trọ lên Cloudinary (hỗ trợ Partial Success)
+      description: |
+        Chủ trọ tải lên 1 hoặc nhiều ảnh (tối đa 10 ảnh) cho phòng trọ.
+        Mỗi phòng chứa tối đa 10 ảnh. Nếu số lượng ảnh gửi lên vượt quá số slot còn trống, hệ thống
+        vẫn tiếp nhận các ảnh hợp lệ trong phạm vi slot cho phép và đánh dấu các ảnh thừa vào danh sách thất bại (Partial Success).
+      operationId: uploadRoomImages
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: roomId
+          in: path
+          required: true
+          description: UUID của phòng trọ cần tải ảnh
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - images
+              properties:
+                images:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                  description: Danh sách file ảnh phòng trọ (tối đa 10 files, mỗi file <= 5MB)
+      responses:
+        '201':
+          description: Tải lên thành công 100% tất cả ảnh được gửi
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadResponse'
+        '200':
+          description: Thành công một phần (Partial Success - một số ảnh thành công, một số ảnh lỗi)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadResponse'
+        '400':
+          description: Tất cả ảnh đều thất bại hoặc phòng đã đầy 10 ảnh
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchUploadResponse'
+        '401':
+          description: Chưa đăng nhập hoặc token không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '403':
+          description: Không đủ quyền truy cập (chỉ LANDLORD mới được phép)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Phòng trọ không tồn tại hoặc không thuộc quyền sở hữu của chủ trọ (Anti-Enumeration)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '500':
+          description: Lỗi máy chủ nội bộ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+  /api/v1/landlord/rooms/{roomId}/images/{imageId}:
+    delete:
+      tags:
+        - Landlord Media Management
+      summary: Xóa một ảnh của phòng trọ
+      description: |
+        Chủ trọ xóa 1 ảnh khỏi phòng trọ. Hệ thống xóa bản ghi khỏi Database trước (coi Database là Source of Truth),
+        sau đó xóa file trên Cloudinary ở background.
+      operationId: deleteRoomImage
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: roomId
+          in: path
+          required: true
+          description: UUID của phòng trọ
+          schema:
+            type: string
+            format: uuid
+        - name: imageId
+          in: path
+          required: true
+          description: UUID của ảnh phòng trọ cần xóa
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Xóa ảnh thành công
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: Xóa ảnh phòng trọ thành công
+        '401':
+          description: Chưa đăng nhập hoặc token không hợp lệ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '403':
+          description: Không đủ quyền truy cập (chỉ LANDLORD mới được phép)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Phòng trọ hoặc ảnh không tồn tại, hoặc không thuộc quyền sở hữu của chủ trọ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '500':
+          description: Lỗi máy chủ nội bộ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    PropertyCoverImageResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Tải ảnh bìa khu trọ thành công
+        data:
+          type: object
+          properties:
+            propertyId:
+              type: string
+              format: uuid
+              example: 550e8400-e29b-41d4-a716-446655440010
+            coverImageUrl:
+              type: string
+              format: uri
+              example: https://res.cloudinary.com/rentmate/image/upload/v1731835000/rentmate/properties/prop-10/cover_1731835000.webp
+
+    BatchUploadResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        summary:
+          type: object
+          properties:
+            totalRequested:
+              type: integer
+              example: 3
+            succeeded:
+              type: integer
+              example: 2
+            failed:
+              type: integer
+              example: 1
+            remainingSlots:
+              type: integer
+              example: 0
+        uploaded:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchUploadSuccessItem'
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/BatchUploadFailureItem'
+
+    BatchUploadSuccessItem:
+      type: object
+      properties:
+        index:
+          type: integer
+          example: 0
+        originalName:
+          type: string
+          example: phong_khach.jpg
+        size:
+          type: integer
+          example: 1542000
+        id:
+          type: string
+          format: uuid
+          example: 550e8400-e29b-41d4-a716-446655440050
+        url:
+          type: string
+          format: uri
+          example: https://res.cloudinary.com/rentmate/image/upload/v1731835000/rentmate/rooms/r-20/img-1.webp
+        publicId:
+          type: string
+          example: rentmate/rooms/r-20/img-1
+        sortOrder:
+          type: integer
+          example: 1
+
+    BatchUploadFailureItem:
+      type: object
+      properties:
+        index:
+          type: integer
+          example: 2
+        originalName:
+          type: string
+          example: ban_cong.jpg
+        size:
+          type: integer
+          example: 2048000
+        code:
+          type: string
+          example: ROOM_IMAGE_LIMIT_EXCEEDED
+        message:
+          type: string
+          example: Vượt quá giới hạn tối đa 10 ảnh của phòng trọ
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          example: Tham số đầu vào không hợp lệ
+        traceId:
+          type: string
+          example: c9f9e5a1-5748-43db-8051-24856fdbba1a
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
