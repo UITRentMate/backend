@@ -136,6 +136,7 @@ describe('POST /api/v1/landlord/rooms/:roomId/images', () => {
     stub(prisma.room, 'count', async () => 1);
     stub(prisma.roomImage, 'count', async () => 2);
     stub(prisma.roomImage, 'aggregate', async () => ({ _max: { sortOrder: 1 } }));
+    stub(prisma, '$transaction', async (fn: any) => fn(prisma));
 
     let uploadCount = 0;
     stub(mediaService, 'uploadStream', async () => {
@@ -183,6 +184,7 @@ describe('POST /api/v1/landlord/rooms/:roomId/images', () => {
     stub(prisma.room, 'count', async () => 1);
     stub(prisma.roomImage, 'count', async () => 9); // Only 1 slot left!
     stub(prisma.roomImage, 'aggregate', async () => ({ _max: { sortOrder: 8 } }));
+    stub(prisma, '$transaction', async (fn: any) => fn(prisma));
 
     stub(mediaService, 'uploadStream', async () => ({
       secureUrl: 'https://res.cloudinary.com/test-cloud/image/upload/v1/rentmate/rooms/r-1/img-1.webp',
@@ -227,6 +229,7 @@ describe('POST /api/v1/landlord/rooms/:roomId/images', () => {
     stub(prisma.room, 'count', async () => 1);
     stub(prisma.roomImage, 'count', async () => 0);
     stub(prisma.roomImage, 'aggregate', async () => ({ _max: { sortOrder: -1 } }));
+    stub(prisma, '$transaction', async (fn: any) => fn(prisma));
 
     stub(mediaService, 'uploadStream', async () => ({
       secureUrl: 'https://res.cloudinary.com/test-cloud/image/upload/v1/rentmate/rooms/r-1/img-1.webp',
@@ -266,6 +269,7 @@ describe('POST /api/v1/landlord/rooms/:roomId/images', () => {
     stub(prisma.room, 'count', async () => 1);
     stub(prisma.roomImage, 'count', async () => 0);
     stub(prisma.roomImage, 'aggregate', async () => ({ _max: { sortOrder: -1 } }));
+    stub(prisma, '$transaction', async (fn: any) => fn(prisma));
 
     let compensatedPublicId: string | null = null;
     stub(mediaService, 'uploadStream', async () => ({
@@ -298,5 +302,93 @@ describe('POST /api/v1/landlord/rooms/:roomId/images', () => {
     assert.equal(body.summary.failed, 1);
     assert.equal(body.failed[0].code, 'DB_INSERT_FAILED');
     assert.equal(compensatedPublicId, 'rentmate/rooms/r-1/img-1');
+  });
+
+  test('rejects file with unsupported MIME type even when magic bytes are valid JPEG', async () => {
+    stub(prisma.user, 'findUnique', async () => mockLandlord);
+    stub(prisma.room, 'count', async () => 1);
+    stub(prisma.roomImage, 'count', async () => 0);
+    stub(prisma.roomImage, 'aggregate', async () => ({ _max: { sortOrder: -1 } }));
+    stub(prisma, '$transaction', async (fn: any) => fn(prisma));
+
+    let uploadStreamCalled = 0;
+    stub(mediaService, 'uploadStream', async () => {
+      uploadStreamCalled++;
+      return {
+        secureUrl: 'https://res.cloudinary.com/test-cloud/image/upload/v1/rentmate/rooms/r-1/img-1.webp',
+        publicId: 'rentmate/rooms/r-1/img-1',
+      };
+    });
+    stub(prisma.roomImage, 'create', async (args: any) => ({
+      id: 'img-1',
+      roomId: mockRoomId,
+      imageUrl: args.data.imageUrl,
+      sortOrder: args.data.sortOrder,
+      createdAt: new Date(),
+    }));
+
+    const formData = new FormData();
+    const validFile = new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])], { type: 'image/jpeg' });
+    // JPEG binary signature nhưng khai báo MIME type không hợp lệ (image/gif)
+    const badMimeFile = new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])], { type: 'image/gif' });
+    formData.append('images', validFile, 'valid.jpg');
+    formData.append('images', badMimeFile, 'disguised.gif');
+
+    const { response, body } = await request(`/api/v1/landlord/rooms/${mockRoomId}/images`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+      },
+      body: formData,
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(uploadStreamCalled, 1); // Chỉ gọi Cloudinary đúng 1 lần cho file hợp lệ
+    assert.equal(body.summary.succeeded, 1);
+    assert.equal(body.summary.failed, 1);
+    assert.equal(body.failed[0].originalName, 'disguised.gif');
+    assert.equal(body.failed[0].code, 'UNSUPPORTED_MEDIA_TYPE');
+  });
+
+  test('compensates Cloudinary upload when concurrent batch fills remaining slot before DB insert', async () => {
+    stub(prisma.user, 'findUnique', async () => mockLandlord);
+    stub(prisma.room, 'count', async () => 1);
+    stub(prisma, '$transaction', async (fn: any) => fn(prisma));
+
+    let countCalls = 0;
+    stub(prisma.roomImage, 'count', async () => {
+      countCalls++;
+      // Lần pre-check thấy còn 1 slot (9 ảnh), nhưng khi vào transaction thì request khác đã lấp đầy 10 ảnh
+      return countCalls === 1 ? 9 : 10;
+    });
+
+    const deletedPublicIds: string[] = [];
+    stub(mediaService, 'uploadStream', async () => ({
+      secureUrl: 'https://res.cloudinary.com/test-cloud/image/upload/v1/rentmate/rooms/r-1/img-race.webp',
+      publicId: 'rentmate/rooms/r-1/img-race',
+    }));
+    stub(mediaService, 'deleteResource', async (publicId: string) => {
+      deletedPublicIds.push(publicId);
+      return true;
+    });
+
+    const formData = new FormData();
+    const file = new Blob([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])], { type: 'image/jpeg' });
+    formData.append('images', file, 'race.jpg');
+
+    const { response, body } = await request(`/api/v1/landlord/rooms/${mockRoomId}/images`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${signAccessToken(mockLandlord.id)}`,
+      },
+      body: formData,
+    });
+
+    assert.equal(response.status, 400);
+    assert.equal(body.summary.succeeded, 0);
+    assert.equal(body.summary.failed, 1);
+    assert.equal(body.summary.remainingSlots, 0);
+    assert.equal(body.failed[0].code, 'ROOM_IMAGE_LIMIT_EXCEEDED');
+    assert.deepEqual(deletedPublicIds, ['rentmate/rooms/r-1/img-race']);
   });
 });

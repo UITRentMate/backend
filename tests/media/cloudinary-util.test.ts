@@ -5,6 +5,7 @@ import {
   buildPropertyCoverPublicId,
   buildRoomImagePublicId,
   validateImageBufferMagicBytes,
+  validateUploadedImageFile,
 } from '../../src/common/utils/cloudinary.util';
 
 describe('Cloudinary Utilities', () => {
@@ -50,5 +51,13 @@ describe('Cloudinary Utilities', () => {
 
     const invalidBuffer = Buffer.from([0x00, 0x01, 0x02, 0x03]);
     assert.equal(validateImageBufferMagicBytes(invalidBuffer).valid, false);
+  });
+
+  test('validateUploadedImageFile requires both supported MIME type and matching magic bytes', () => {
+    const jpegBuffer = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+    assert.equal(validateUploadedImageFile('image/jpeg', jpegBuffer).valid, true);
+    assert.equal(validateUploadedImageFile('image/gif', jpegBuffer).valid, false);
+    assert.equal(validateUploadedImageFile('application/octet-stream', jpegBuffer).valid, false);
+    assert.equal(validateUploadedImageFile('image/png', jpegBuffer).valid, false);
   });
 });
