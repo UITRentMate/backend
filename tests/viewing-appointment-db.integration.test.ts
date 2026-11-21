@@ -23,6 +23,21 @@ async function request(path: string, token: string, body: unknown) {
 test('Live DB: concurrent confirmations of one room/time slot cannot both succeed', async (t) => {
   try { await prisma.$queryRaw`SELECT 1`; } catch { t.skip('PostgreSQL is not available'); return; }
 
+  const requiredColumns = ['note', 'rejection_reason', 'cancellation_reason'];
+  const columnRows = await prisma.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'viewing_appointments'
+      AND column_name IN ('note', 'rejection_reason', 'cancellation_reason')
+  `;
+  const existingColumns = new Set(columnRows.map(({ column_name }) => column_name));
+  const missingColumns = requiredColumns.filter((column) => !existingColumns.has(column));
+  if (missingColumns.length > 0) {
+    t.skip('Viewing appointment migration is not applied; missing columns: ' + missingColumns.join(', '));
+    return;
+  }
+
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const users: string[] = [];
   let propertyId: string | undefined;
