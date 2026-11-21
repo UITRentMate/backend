@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { requireRole } from '../../common/middleware/require-role';
+import { uploadMultipleImages } from '../media/media.middleware';
 import { RoomController } from './room.controller';
 import { RoomManagementController } from './room-management.controller';
 
@@ -62,4 +63,19 @@ roomRouter.patch(
   '/api/v1/landlord/rooms/:roomId/visibility',
   requireRole('LANDLORD'),
   RoomManagementController.updateVisibility,
+);
+
+// ROOM-07: Tải bộ ảnh phòng trọ lên Cloudinary (P2-03)
+roomRouter.post(
+  '/api/v1/landlord/rooms/:roomId/images',
+  requireRole('LANDLORD'),
+  uploadMultipleImages('images', 10),
+  RoomManagementController.uploadRoomImages,
+);
+
+// ROOM-08: Xóa ảnh phòng trọ (P2-03)
+roomRouter.delete(
+  '/api/v1/landlord/rooms/:roomId/images/:imageId',
+  requireRole('LANDLORD'),
+  RoomManagementController.deleteRoomImage,
 );

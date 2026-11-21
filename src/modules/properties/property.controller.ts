@@ -1,4 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
+import { ApiError } from '../../common/errors/api-error';
 import { PropertyService } from './property.service';
 import {
   validateCreateProperty,
@@ -111,6 +112,34 @@ export class PropertyController {
       const propertyId = validatePropertyId(req.params.propertyId);
       const result = await PropertyService.getPublicPropertyDetail(propertyId);
       res.status(200).json(result);
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * POST /api/v1/landlord/properties/:propertyId/cover-image
+   */
+  public static async uploadCoverImage(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    try {
+      const landlordId = res.locals.userId as string;
+      const propertyId = validatePropertyId(req.params.propertyId);
+      const file = req.file;
+
+      if (!file) {
+        throw new ApiError(400, 'FILE_REQUIRED', 'Vui lòng chọn file ảnh để tải lên');
+      }
+
+      const result = await PropertyService.uploadCoverImage(landlordId, propertyId, file.buffer);
+      res.status(200).json({
+        success: true,
+        message: 'Tải ảnh bìa khu trọ thành công',
+        data: result,
+      });
     } catch (error) {
       next(error);
     }

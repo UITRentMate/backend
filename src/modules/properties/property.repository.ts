@@ -207,4 +207,19 @@ export class PropertyRepository {
       },
     });
   }
+
+  /**
+   * Cập nhật URL ảnh bìa khu trọ
+   */
+  public static async updateCoverImage(propertyId: string, coverImageUrl: string) {
+    return prisma.property.update({
+      where: { id: propertyId },
+      data: { coverImageUrl },
+      select: {
+        id: true,
+        name: true,
+        coverImageUrl: true,
+      },
+    });
+  }
 }

@@ -179,3 +179,12 @@ export function validatePropertyId(id: unknown): string {
   }
   return id;
 }
+
+export function validateImageId(id: unknown): string {
+  if (typeof id !== 'string' || !UUID_REGEX.test(id)) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'Định dạng mã ảnh (imageId) không hợp lệ', {
+      imageId: ['Mã ảnh phải là UUID hợp lệ'],
+    });
+  }
+  return id;
+}

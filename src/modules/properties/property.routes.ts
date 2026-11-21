@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { requireAuth } from '../../common/require-auth';
 import { requireRole } from '../../common/middleware/require-role';
+import { uploadSingleImage } from '../media/media.middleware';
 import { PropertyController } from './property.controller';
 
 export const propertyRouter = Router();
@@ -47,6 +48,15 @@ propertyRouter.patch(
   requireAuth,
   requireRole('LANDLORD'),
   PropertyController.archiveProperty,
+);
+
+// PROP-06: Tải ảnh bìa khu trọ lên Cloudinary (P2-03)
+propertyRouter.post(
+  '/api/v1/landlord/properties/:propertyId/cover-image',
+  requireAuth,
+  requireRole('LANDLORD'),
+  uploadSingleImage('coverImage'),
+  PropertyController.uploadCoverImage,
 );
 
 // ==========================================

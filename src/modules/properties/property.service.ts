@@ -1,6 +1,11 @@
 import { ApiError } from '../../common/errors/api-error';
 import { PropertyRepository } from './property.repository';
 import {
+  buildPropertyCoverPublicId,
+  extractCloudinaryPublicId,
+} from '../../common/utils/cloudinary.util';
+import { mediaService } from '../media/media.service';
+import {
   mapToLandlordPropertyCard,
   mapToLandlordPropertyDetail,
   mapToPublicPropertyDetail,
@@ -235,5 +240,52 @@ export class PropertyService {
     }
 
     await PropertyRepository.archiveProperty(propertyId);
+  }
+
+  /**
+   * Tải ảnh bìa khu trọ lên Cloudinary và cập nhật URL vào database
+   * Có cơ chế Anti-Enumeration (404), dọn dẹp ảnh cũ, và rollback bù trừ nếu DB lỗi
+   */
+  public static async uploadCoverImage(
+    landlordId: string,
+    propertyId: string,
+    fileBuffer: Buffer,
+  ): Promise<{ propertyId: string; coverImageUrl: string }> {
+    const property = await PropertyRepository.findPropertyById(propertyId);
+
+    if (!property || property.landlordId !== landlordId) {
+      throw new ApiError(
+        404,
+        'PROPERTY_NOT_FOUND',
+        'Khu trọ không tồn tại hoặc bạn không có quyền truy cập',
+      );
+    }
+
+    const publicId = buildPropertyCoverPublicId(propertyId);
+    const uploadResult = await mediaService.uploadStream(fileBuffer, { publicId });
+
+    let updated;
+    try {
+      updated = await PropertyRepository.updateCoverImage(propertyId, uploadResult.secureUrl);
+    } catch (dbError) {
+      // Bù trừ lỗi: Xóa ảnh vừa upload trên Cloudinary nếu DB update thất bại
+      await mediaService.deleteResource(uploadResult.publicId);
+      throw dbError;
+    }
+
+    // Dọn dẹp ảnh bìa cũ trên Cloudinary ở background nếu có
+    if (property.coverImageUrl) {
+      const oldPublicId = extractCloudinaryPublicId(property.coverImageUrl);
+      if (oldPublicId) {
+        mediaService.deleteResource(oldPublicId).catch((err) => {
+          console.warn(`[PropertyService] Failed to cleanup old cover ${oldPublicId}:`, err);
+        });
+      }
+    }
+
+    return {
+      propertyId: updated.id,
+      coverImageUrl: updated.coverImageUrl!,
+    };
   }
 }
