@@ -31,7 +31,7 @@ export class RoomService {
   }
 
   /**
-   * SEARCH-02: Xem chi tiết toàn diện phòng trọ công khai theo roomId
+   * SEARCH-02: Xem chi tiết toàn diện phòng trọ công khai theo roomId (hỗ trợ cả URL canonical /rooms/:roomId và alias /public/rooms/:roomId)
    */
   public static async getPublicRoomDetail(roomId: string): Promise<PublicRoomDetailDTO> {
     const room = await RoomRepository.findPublicRoomById(roomId);
@@ -51,5 +51,12 @@ export class RoomService {
     ]);
 
     return mapToPublicRoomDetailDTO(room, totalRooms, vacantRooms);
+  }
+
+  /**
+   * URL Canonical cho xem chi tiết phòng trọ công khai (/api/v1/rooms/:roomId)
+   */
+  public static async getCanonicalRoomDetail(roomId: string): Promise<PublicRoomDetailDTO> {
+    return RoomService.getPublicRoomDetail(roomId);
   }
 }
