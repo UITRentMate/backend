@@ -602,4 +602,119 @@ describe('RoomManagementRepository Unit Tests', () => {
       assert.equal(updatedData.visibilityStatus, 'VISIBLE');
     });
   });
+
+  describe('Concurrency, Serializable Isolation & Unique Constraint Mapping', () => {
+    test('createRoomTransaction chạy ở mức cô lập Serializable và ánh xạ P2002 sang 409 DUPLICATE_ROOM_CODE', async () => {
+      let receivedOptions: any = null;
+      const mockTx: any = {
+        room: {
+          count: async () => 0,
+          create: async () => {
+            throw Object.assign(new Error('Unique constraint failed'), { code: 'P2002' });
+          },
+        },
+      };
+
+      stub(prisma, '$transaction', async (fn: any, options: any) => {
+        receivedOptions = options;
+        return fn(mockTx);
+      });
+
+      const input: CreateRoomInput = {
+        roomCode: 'P.301',
+        areaM2: 28.5,
+        maxOccupants: 2,
+        monthlyRent: 4500000,
+        depositRequired: 4500000,
+        electricityRate: 3800,
+        waterRate: 25000,
+      };
+
+      await assert.rejects(
+        () => RoomManagementRepository.createRoomTransaction(mockPropertyId, input),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'DUPLICATE_ROOM_CODE');
+          return true;
+        },
+      );
+
+      assert.equal(receivedOptions?.isolationLevel, 'Serializable');
+    });
+
+    test('createRoomTransaction tự động retry khi gặp lỗi P2034 Serialization Conflict', async () => {
+      let attempt = 0;
+      const mockTx: any = {
+        room: {
+          count: async () => {
+            attempt++;
+            if (attempt === 1) {
+              throw Object.assign(new Error('Serialization failure'), { code: 'P2034' });
+            }
+            return 1; // Lần retry thấy bản ghi vừa commit
+          },
+        },
+      };
+
+      stub(prisma, '$transaction', async (fn: any) => fn(mockTx));
+
+      const input: CreateRoomInput = {
+        roomCode: 'P.301',
+        areaM2: 28.5,
+        maxOccupants: 2,
+        monthlyRent: 4500000,
+        depositRequired: 4500000,
+        electricityRate: 3800,
+        waterRate: 25000,
+      };
+
+      await assert.rejects(
+        () => RoomManagementRepository.createRoomTransaction(mockPropertyId, input),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'DUPLICATE_ROOM_CODE');
+          return true;
+        },
+      );
+      assert.equal(attempt, 2);
+    });
+
+    test('transitionToMaintenanceTransaction chạy ở mức cô lập Serializable và retry P2034 khi có request vừa commit', async () => {
+      let receivedOptions: any = null;
+      let attempt = 0;
+
+      const mockTx: any = {
+        contract: { count: async () => 0 },
+        rentalRequest: {
+          count: async () => {
+            attempt++;
+            if (attempt === 1) {
+              throw Object.assign(new Error('Serialization failure'), { code: 'P2034' });
+            }
+            return 1; // Lần retry phát hiện request PENDING mới được tạo
+          },
+        },
+      };
+
+      stub(prisma, '$transaction', async (fn: any, options: any) => {
+        receivedOptions = options;
+        return fn(mockTx);
+      });
+
+      await assert.rejects(
+        () => RoomManagementRepository.transitionToMaintenanceTransaction(mockRoomId),
+        (err: unknown) => {
+          assert.ok(err instanceof ApiError);
+          assert.equal(err.statusCode, 409);
+          assert.equal(err.code, 'CANNOT_MAINTAIN_ACTIVE_ROOM');
+          return true;
+        },
+      );
+
+      assert.equal(receivedOptions?.isolationLevel, 'Serializable');
+      assert.equal(attempt, 2);
+    });
+  });
 });

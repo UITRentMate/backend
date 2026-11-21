@@ -5,6 +5,7 @@
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "prebuild": "prisma generate",
     "build": "tsc",
     "test": "tsx --test tests/**/*.test.ts tests/*.test.ts",
     "start": "node dist/server.js",

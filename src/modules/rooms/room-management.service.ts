@@ -131,7 +131,7 @@ export class RoomManagementService {
     if (isDuplicate) {
       throw new ApiError(
         409,
-        'ROOM_CODE_ALREADY_EXISTS',
+        'DUPLICATE_ROOM_CODE',
         'Mã phòng đã tồn tại trong khu trọ này',
       );
     }
@@ -243,7 +243,7 @@ export class RoomManagementService {
     if (isDuplicate) {
       throw new ApiError(
         409,
-        'ROOM_CODE_ALREADY_EXISTS',
+        'DUPLICATE_ROOM_CODE',
         'Mã phòng đã tồn tại trong khu trọ này',
       );
     }

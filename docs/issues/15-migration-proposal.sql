@@ -1,7 +1,9 @@
 -- ============================================================================
--- ĐỀ XUẤT MIGRATION: [BE-P2-02] RÀNG BUỘC MÃ PHÒNG DUY NHẤT THEO KHU TRỌ
+-- MIGRATION: [BE-P2-02] RÀNG BUỘC MÃ PHÒNG DUY NHẤT THEO KHU TRỌ
 -- Issue: #15 (BE-P2-02)
 -- Bảng áp dụng: public.rooms
+-- Trạng thái: Đã được đưa thành migration chính thức tại:
+--   prisma/migrations/20261121000000_add_room_code_unique_index/migration.sql
 -- ============================================================================
 
 -- BƯỚC 1: KIỂM TRA DỮ LIỆU TRÙNG LẶP THEO CASE-INSENSITIVE (LOWER)
