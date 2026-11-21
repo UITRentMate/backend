@@ -208,9 +208,12 @@ model ViewingAppointment {
   tenantId       String   @map("tenant_id") @db.Uuid
   contactPhone   String   @map("contact_phone") @db.VarChar(20)
   status         String   @db.VarChar(30)
-  selectedSlotId String?  @map("selected_slot_id") @db.Uuid
-  viewedById     String?  @map("viewed_by_id") @db.Uuid
-  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  selectedSlotId     String?  @map("selected_slot_id") @db.Uuid
+  viewedById         String?  @map("viewed_by_id") @db.Uuid
+  note               String?  @db.Text
+  rejectionReason    String?  @map("rejection_reason") @db.Text
+  cancellationReason String?  @map("cancellation_reason") @db.Text
+  createdAt          DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   // Relations
   room         Room                @relation(fields: [roomId], references: [id], onDelete: Restrict)
@@ -242,7 +245,10 @@ model RentalRequest {
   roomId           String    @map("room_id") @db.Uuid
   tenantId         String    @map("tenant_id") @db.Uuid
   desiredStartDate DateTime  @map("desired_start_date") @db.Date
+  durationMonths   Int?      @map("duration_months")
+  message          String?   @db.Text
   status           String    @db.VarChar(20)
+  rejectionReason  String?   @map("rejection_reason") @db.Text
   reviewedAt       DateTime? @map("reviewed_at") @db.Timestamptz(6)
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -251,6 +257,8 @@ model RentalRequest {
   tenant    User       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   contracts Contract[]
 
+  @@index([roomId])
+  @@index([tenantId])
   @@map("rental_requests")
 }
 

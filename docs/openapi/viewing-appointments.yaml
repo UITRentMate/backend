@@ -1,0 +1,922 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Viewing Appointments API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Quản lý lịch hẹn xem phòng (BE-P2-05)**.
+    Bao gồm các endpoint nghiệp vụ dành cho Người thuê (`TENANT`) và Chủ trọ (`LANDLORD`) trong phạm vi P0: Tạo lịch, Xem danh sách/chi tiết, Xác nhận, Từ chối và Hủy lịch hẹn.
+
+    ### 1. Bảng chuyển trạng thái (State Machine)
+    ```text
+    PENDING ──► CONFIRMED
+       │
+       ├────► REJECTED
+       └────► CANCELLED
+
+    CONFIRMED ──► CANCELLED (chỉ khi trước thời điểm bắt đầu của khung giờ đã chọn)
+    ```
+    - Trạng thái cuối (`REJECTED`, `CANCELLED`): Bất biến (immutable), không được phép chuyển sang bất kỳ trạng thái nào khác.
+    - Trạng thái `PENDING`: Có thể chuyển sang `CONFIRMED`, `REJECTED`, hoặc `CANCELLED`.
+    - Trạng thái `CONFIRMED`: Chỉ có thể chuyển sang `CANCELLED` nếu thời điểm hủy diễn ra trước `startAt` của khung giờ đã chọn.
+
+    ### 2. Quy tắc phân quyền và kiểm soát dữ liệu
+    - **Người thuê (TENANT):** Tạo lịch hẹn cho phòng đủ điều kiện công khai; xem và hủy các lịch hẹn do chính mình tạo (`tenantId`).
+    - **Chủ trọ (LANDLORD):** Xem danh sách và chi tiết các lịch hẹn thuộc phòng/khu trọ do mình sở hữu (`room.property.landlordId`); xác nhận lịch hẹn (chọn một slot hợp lệ); từ chối hoặc hủy lịch hẹn kèm lý do.
+    - **Bảo vệ dữ liệu nhạy cảm:** Số điện thoại liên lạc (`contactPhone`) chỉ được trả về cho các bên có thẩm quyền (người thuê tạo lịch hoặc chủ trọ sở hữu phòng), tuyệt đối không công khai ra ngoài. Mật khẩu và token không bao giờ xuất hiện trong dữ liệu trả về.
+
+    ### 3. Quy tắc khung giờ và giải quyết xung đột (Conflict Resolution)
+    - Thời lượng mỗi buổi xem phòng là một giá trị cấu hình hệ thống duy nhất: **30 phút** (mặc định), không cấu hình riêng theo phòng.
+    - Một yêu cầu tạo lịch gửi 1–3 khung giờ đề xuất (`proposedSlots`), phải có múi giờ, nằm trong tương lai và không được chồng chéo nhau (khoảng cách giữa các slot $\ge$ 30 phút).
+    - Các khung giờ của lịch ở trạng thái `PENDING` không chặn lẫn nhau.
+    - Hai lịch hẹn `CONFIRMED` cho cùng một phòng **tuyệt đối không được trùng hoặc chồng chéo khung giờ**.
+    - Việc kiểm tra xung đột trùng lịch được thực thi bên trong transaction khi xác nhận; nếu bị trùng sẽ trả về mã lỗi `409 SLOT_CONFLICT`.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+    license:
+      name: MIT
+      url: https://opensource.org/licenses/MIT
+servers:
+  - url: https://api.rentmate.vn
+    description: Máy chủ chính thức (Production)
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: Viewing Appointments
+    description: Các API quản lý lịch hẹn xem phòng trực tiếp giữa Người thuê và Chủ trọ (P0 Scope).
+
+paths:
+  /api/v1/viewing-appointments:
+    post:
+      tags:
+        - Viewing Appointments
+      summary: Tạo lịch hẹn xem phòng mới (VIEW-01)
+      description: |
+        Người thuê (`TENANT`) gửi yêu cầu đặt lịch xem phòng trực tiếp với 1 đến 3 khung giờ đề xuất.
+        Phòng phải tồn tại và đủ điều kiện hiển thị công khai (VACANT, VISIBLE, không bị lưu trữ, khu trọ và tài khoản chủ trọ ACTIVE).
+        Nếu người thuê đang có một lịch hẹn `PENDING` với cùng phòng đó, hệ thống sẽ từ chối để chống trùng lặp (`409 DUPLICATE_APPOINTMENT`).
+      operationId: createViewingAppointment
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateViewingAppointmentRequest'
+            examples:
+              validRequest:
+                summary: Đề xuất 2 khung giờ xem phòng
+                value:
+                  roomId: "123e4567-e89b-12d3-a456-426614174000"
+                  proposedSlots:
+                    - "2026-11-20T09:00:00+07:00"
+                    - "2026-11-20T14:30:00+07:00"
+                  contactPhone: "0901234567"
+                  note: "Tôi muốn đến xem phòng vào buổi sáng hoặc đầu giờ chiều."
+      responses:
+        '201':
+          description: Tạo lịch hẹn thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateViewingAppointmentResponse'
+              examples:
+                successResponse:
+                  summary: Tạo thành công ở trạng thái PENDING
+                  value:
+                    appointmentId: "987fcdeb-51a2-43f7-9876-ba0987654321"
+                    status: "PENDING"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RoomNotFound'
+        '409':
+          description: Xung đột lịch hẹn đang chờ xử lý cho cùng phòng
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                duplicatePending:
+                  value:
+                    success: false
+                    code: "DUPLICATE_APPOINTMENT"
+                    message: "Bạn đã có một lịch hẹn xem phòng đang chờ xử lý cho phòng trọ này"
+                    traceId: "77d24ff9-8f08-4ba9-b337-ee2436d6ea29"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - Viewing Appointments
+      summary: Lấy danh sách lịch hẹn xem phòng theo vai trò (VIEW-02)
+      description: |
+        Tra cứu danh sách lịch hẹn được phân quyền theo người dùng hiện tại:
+        - Người thuê (`TENANT`): Chỉ xem các lịch do chính mình gửi yêu cầu.
+        - Chủ trọ (`LANDLORD`): Xem các lịch hẹn thuộc các phòng trong khu trọ do mình làm chủ.
+        Hỗ trợ phân trang và lọc theo trạng thái (`status`), phòng (`roomId`), hoặc khoảng thời gian tạo (`fromDate`, `toDate`).
+      operationId: getViewingAppointments
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Lọc theo trạng thái lịch hẹn
+          required: false
+          schema:
+            type: string
+            enum: [PENDING, CONFIRMED, REJECTED, CANCELLED]
+        - name: roomId
+          in: query
+          description: Lọc theo mã định danh phòng trọ
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: fromDate
+          in: query
+          description: Lọc lịch hẹn tạo từ ngày (ISO 8601)
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: toDate
+          in: query
+          description: Lọc lịch hẹn tạo đến ngày (ISO 8601)
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          description: Số thứ tự trang (mặc định 1)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          description: Số bản ghi trên mỗi trang (mặc định 10, tối đa 50)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+      responses:
+        '200':
+          description: Lấy danh sách lịch hẹn thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewingAppointmentListResponse'
+              examples:
+                sampleList:
+                  value:
+                    items:
+                      - appointmentId: "987fcdeb-51a2-43f7-9876-ba0987654321"
+                        roomId: "123e4567-e89b-12d3-a456-426614174000"
+                        status: "PENDING"
+                        proposedSlots:
+                          - id: "550e8400-e29b-41d4-a716-446655440000"
+                            startAt: "2026-11-20T09:00:00.000Z"
+                          - id: "550e8400-e29b-41d4-a716-446655440001"
+                            startAt: "2026-11-20T14:30:00.000Z"
+                        selectedSlot: null
+                        createdAt: "2026-11-14T10:00:00.000Z"
+                    total: 1
+                    page: 1
+                    pageSize: 10
+                    totalPages: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/viewing-appointments/{appointmentId}:
+    get:
+      tags:
+        - Viewing Appointments
+      summary: Xem chi tiết một lịch hẹn xem phòng (VIEW-03)
+      description: |
+        Xem đầy đủ thông tin của một lịch hẹn: phòng liên quan, người thuê, các khung giờ đề xuất, khung giờ được chọn (nếu đã xác nhận), lý do từ chối/hủy (nếu có).
+        Yêu cầu quyền sở hữu: Người thuê chỉ xem được lịch của mình; Chủ trọ chỉ xem được lịch thuộc phòng của mình.
+      operationId: getViewingAppointmentDetail
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: appointmentId
+          in: path
+          required: true
+          description: Mã định danh UUID của lịch hẹn
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Lấy thông tin chi tiết thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewingAppointmentDetailResponse'
+              examples:
+                detailExample:
+                  value:
+                    appointmentId: "987fcdeb-51a2-43f7-9876-ba0987654321"
+                    roomId: "123e4567-e89b-12d3-a456-426614174000"
+                    tenantId: "456e4567-e89b-12d3-a456-426614174000"
+                    status: "PENDING"
+                    contactPhone: "0901234567"
+                    note: "Tôi muốn xem phòng buổi sáng"
+                    rejectionReason: null
+                    cancellationReason: null
+                    proposedSlots:
+                      - id: "550e8400-e29b-41d4-a716-446655440000"
+                        startAt: "2026-11-20T09:00:00.000Z"
+                      - id: "550e8400-e29b-41d4-a716-446655440001"
+                        startAt: "2026-11-20T14:30:00.000Z"
+                    selectedSlot: null
+                    room:
+                      id: "123e4567-e89b-12d3-a456-426614174000"
+                      roomCode: "P.201"
+                      property:
+                        id: "321e4567-e89b-12d3-a456-426614174000"
+                        name: "Nhà trọ Hoa Mai"
+                        address: "Số 123 Đường D1, Phường Linh Trung, TP. Thủ Đức"
+                    tenant:
+                      id: "456e4567-e89b-12d3-a456-426614174000"
+                      fullName: "Nguyễn Văn Người Thuê"
+                    createdAt: "2026-11-14T10:00:00.000Z"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/viewing-appointments/{appointmentId}/confirm:
+    patch:
+      tags:
+        - Viewing Appointments
+      summary: Xác nhận lịch hẹn xem phòng (VIEW-04)
+      description: |
+        Chủ trọ (`LANDLORD`) xác nhận một khung giờ phù hợp từ danh sách các slot đã đề xuất (`selectedSlotId`).
+        Hệ thống kiểm tra `selectedSlotId` phải thuộc đúng lịch hẹn này, và đảm bảo khung giờ được chọn không trùng lặp/chồng chéo với bất kỳ lịch hẹn đã `CONFIRMED` nào khác cho cùng phòng trọ.
+        Xử lý kiểm tra xung đột trong Database Transaction chống race condition / double-booking.
+      operationId: confirmViewingAppointment
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: appointmentId
+          in: path
+          required: true
+          description: Mã định danh UUID của lịch hẹn cần xác nhận
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmViewingAppointmentRequest'
+            examples:
+              confirmWithSlotId:
+                summary: Chọn khung giờ hợp lệ
+                value:
+                  selectedSlotId: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        '200':
+          description: Xác nhận lịch hẹn thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmViewingAppointmentResponse'
+              examples:
+                confirmedResult:
+                  value:
+                    appointmentId: "987fcdeb-51a2-43f7-9876-ba0987654321"
+                    status: "CONFIRMED"
+                    selectedSlot:
+                      id: "550e8400-e29b-41d4-a716-446655440000"
+                      startAt: "2026-11-20T09:00:00.000Z"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '409':
+          description: Trạng thái không hợp lệ để xác nhận hoặc xung đột khung giờ đã được đặt trước đó
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                slotConflict:
+                  summary: Khung giờ bị trùng với lịch hẹn đã xác nhận khác
+                  value:
+                    success: false
+                    code: "SLOT_CONFLICT"
+                    message: "Khung giờ này đã bị trùng với một lịch hẹn khác đã xác nhận cho phòng này"
+                    traceId: "b9c026d3-2e48-4361-9c3a-9694c9ad24f6"
+                statusConflict:
+                  summary: Lịch hẹn không ở trạng thái PENDING
+                  value:
+                    success: false
+                    code: "CONFLICT"
+                    message: "Chỉ có thể xác nhận lịch hẹn đang ở trạng thái PENDING"
+                    traceId: "b9c026d3-2e48-4361-9c3a-9694c9ad24f6"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/viewing-appointments/{appointmentId}/reject:
+    patch:
+      tags:
+        - Viewing Appointments
+      summary: Từ chối lịch hẹn xem phòng (VIEW-06)
+      description: |
+        Chủ trọ (`LANDLORD`) từ chối lịch hẹn và bắt buộc cung cấp lý do từ chối rõ ràng (`reason`).
+        Chỉ có thể từ chối khi lịch hẹn đang ở trạng thái `PENDING`. Sau khi từ chối, lịch hẹn chuyển sang trạng thái cuối `REJECTED` và không thể thay đổi thêm.
+      operationId: rejectViewingAppointment
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: appointmentId
+          in: path
+          required: true
+          description: Mã định danh UUID của lịch hẹn cần từ chối
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectViewingAppointmentRequest'
+            examples:
+              rejectRequest:
+                value:
+                  reason: "Tôi có lịch bận đột xuất vào toàn bộ các khung giờ này và không có người hỗ trợ mở cửa phòng."
+      responses:
+        '200':
+          description: Từ chối lịch hẹn thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RejectViewingAppointmentResponse'
+              examples:
+                rejectedResult:
+                  value:
+                    appointmentId: "987fcdeb-51a2-43f7-9876-ba0987654321"
+                    status: "REJECTED"
+                    rejectionReason: "Tôi có lịch bận đột xuất vào toàn bộ các khung giờ này và không có người hỗ trợ mở cửa phòng."
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '409':
+          description: Trạng thái hiện tại không cho phép từ chối
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                alreadyHandled:
+                  value:
+                    success: false
+                    code: "CONFLICT"
+                    message: "Chỉ có thể từ chối lịch hẹn đang ở trạng thái PENDING"
+                    traceId: "c3d18392-1234-4567-89ab-cdef01234567"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/viewing-appointments/{appointmentId}/cancel:
+    patch:
+      tags:
+        - Viewing Appointments
+      summary: Hủy lịch hẹn xem phòng (VIEW-07)
+      description: |
+        Người thuê (`TENANT`) hoặc Chủ trọ (`LANDLORD`) thực hiện hủy lịch hẹn kèm theo lý do bắt buộc (`reason`).
+        Quy tắc hủy:
+        - Trạng thái `PENDING`: Có thể hủy ở bất kỳ thời điểm nào.
+        - Trạng thái `CONFIRMED`: Chỉ được phép hủy trước thời điểm bắt đầu khung giờ đã chọn (`startAt > hiện tại`). Nếu đã đến hoặc qua giờ hẹn, trả về lỗi `409 CANCELLATION_CUTOFF_EXCEEDED`.
+        - Trạng thái cuối (`REJECTED`, `CANCELLED`): Không thể hủy lại.
+      operationId: cancelViewingAppointment
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: appointmentId
+          in: path
+          required: true
+          description: Mã định danh UUID của lịch hẹn cần hủy
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CancelViewingAppointmentRequest'
+            examples:
+              cancelRequest:
+                value:
+                  reason: "Tôi đã tìm được phòng trọ khác phù hợp hơn."
+      responses:
+        '200':
+          description: Hủy lịch hẹn thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelViewingAppointmentResponse'
+              examples:
+                cancelledResult:
+                  value:
+                    appointmentId: "987fcdeb-51a2-43f7-9876-ba0987654321"
+                    status: "CANCELLED"
+                    cancellationReason: "Tôi đã tìm được phòng trọ khác phù hợp hơn."
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/AppointmentNotFound'
+        '409':
+          description: Lịch hẹn đã ở trạng thái cuối hoặc đã quá thời điểm cho phép hủy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                cutoffExceeded:
+                  summary: Quá thời điểm cutoff cho phép hủy lịch confirmed
+                  value:
+                    success: false
+                    code: "CANCELLATION_CUTOFF_EXCEEDED"
+                    message: "Không thể hủy lịch hẹn đã xác nhận khi đã đến hoặc qua giờ hẹn"
+                    traceId: "fa1082bc-9231-483d-9abc-123456789abc"
+                alreadyCancelled:
+                  summary: Lịch hẹn đã bị hủy trước đó
+                  value:
+                    success: false
+                    code: "CONFLICT"
+                    message: "Lịch hẹn đã bị hủy trước đó"
+                    traceId: "fa1082bc-9231-483d-9abc-123456789abc"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Nhập JWT Access Token đã nhận được từ API đăng nhập hoặc đăng ký.
+
+  schemas:
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu đầu vào không hợp lệ"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+          example:
+            proposedSlots:
+              - "Phải có từ 1 đến 3 khung giờ xem phòng"
+        traceId:
+          type: string
+          format: uuid
+          example: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    ViewingSlot:
+      type: object
+      required:
+        - id
+        - startAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Mã định danh của khung giờ xem phòng
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        startAt:
+          type: string
+          format: date-time
+          description: Thời điểm bắt đầu của khung giờ xem phòng (ISO 8601)
+          example: "2026-11-20T09:00:00.000Z"
+
+    CreateViewingAppointmentRequest:
+      type: object
+      required:
+        - roomId
+        - proposedSlots
+      properties:
+        roomId:
+          type: string
+          format: uuid
+          description: Mã định danh phòng muốn xem
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        proposedSlots:
+          type: array
+          minItems: 1
+          maxItems: 3
+          description: Danh sách từ 1 đến 3 mốc thời gian đề xuất (ISO 8601 có múi giờ, nằm trong tương lai, không trùng/chồng chéo)
+          items:
+            type: string
+            format: date-time
+            example: "2026-11-20T09:00:00+07:00"
+        contactPhone:
+          type: string
+          pattern: "^0\\d{9}$"
+          description: Số điện thoại liên hệ (10 chữ số bắt đầu bằng 0). Nếu không truyền, hệ thống sử dụng số điện thoại đăng ký của tài khoản.
+          example: "0901234567"
+        note:
+          type: string
+          maxLength: 500
+          description: Ghi chú hoặc lời nhắn gửi đến chủ trọ
+          example: "Tôi muốn xem phòng vào buổi sáng"
+
+    CreateViewingAppointmentResponse:
+      type: object
+      required:
+        - appointmentId
+        - status
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        status:
+          type: string
+          enum: [PENDING]
+          example: "PENDING"
+
+    ViewingAppointmentListItem:
+      type: object
+      required:
+        - appointmentId
+        - roomId
+        - status
+        - proposedSlots
+        - createdAt
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        roomId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        status:
+          type: string
+          enum: [PENDING, CONFIRMED, REJECTED, CANCELLED]
+          example: "PENDING"
+        contactPhone:
+          type: string
+          nullable: true
+          example: "0901234567"
+        note:
+          type: string
+          nullable: true
+          example: "Tôi muốn xem phòng"
+        rejectionReason:
+          type: string
+          nullable: true
+          example: null
+        cancellationReason:
+          type: string
+          nullable: true
+          example: null
+        proposedSlots:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViewingSlot'
+        selectedSlot:
+          $ref: '#/components/schemas/ViewingSlot'
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-14T10:00:00.000Z"
+
+    ViewingAppointmentListResponse:
+      type: object
+      required:
+        - items
+        - total
+        - page
+        - pageSize
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViewingAppointmentListItem'
+        total:
+          type: integer
+          example: 1
+        page:
+          type: integer
+          example: 1
+        pageSize:
+          type: integer
+          example: 10
+        totalPages:
+          type: integer
+          example: 1
+
+    ViewingAppointmentDetailResponse:
+      type: object
+      required:
+        - appointmentId
+        - roomId
+        - tenantId
+        - status
+        - proposedSlots
+        - createdAt
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        roomId:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        tenantId:
+          type: string
+          format: uuid
+          example: "456e4567-e89b-12d3-a456-426614174000"
+        status:
+          type: string
+          enum: [PENDING, CONFIRMED, REJECTED, CANCELLED]
+          example: "PENDING"
+        contactPhone:
+          type: string
+          nullable: true
+          example: "0901234567"
+        note:
+          type: string
+          nullable: true
+          example: "Tôi muốn xem phòng buổi sáng"
+        rejectionReason:
+          type: string
+          nullable: true
+          example: null
+        cancellationReason:
+          type: string
+          nullable: true
+          example: null
+        proposedSlots:
+          type: array
+          items:
+            $ref: '#/components/schemas/ViewingSlot'
+        selectedSlot:
+          $ref: '#/components/schemas/ViewingSlot'
+          nullable: true
+        room:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+              example: "123e4567-e89b-12d3-a456-426614174000"
+            roomCode:
+              type: string
+              example: "P.201"
+            property:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                  example: "321e4567-e89b-12d3-a456-426614174000"
+                name:
+                  type: string
+                  example: "Nhà trọ Hoa Mai"
+                address:
+                  type: string
+                  example: "Số 123 Đường D1, Phường Linh Trung, TP. Thủ Đức"
+        tenant:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+              example: "456e4567-e89b-12d3-a456-426614174000"
+            fullName:
+              type: string
+              example: "Nguyễn Văn Người Thuê"
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-14T10:00:00.000Z"
+
+    ConfirmViewingAppointmentRequest:
+      type: object
+      required:
+        - selectedSlotId
+      properties:
+        selectedSlotId:
+          type: string
+          format: uuid
+          description: Mã định danh UUID của khung giờ được chủ trọ lựa chọn (phải thuộc danh sách đề xuất của lịch hẹn)
+          example: "550e8400-e29b-41d4-a716-446655440000"
+
+    ConfirmViewingAppointmentResponse:
+      type: object
+      required:
+        - appointmentId
+        - status
+        - selectedSlot
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        status:
+          type: string
+          enum: [CONFIRMED]
+          example: "CONFIRMED"
+        selectedSlot:
+          $ref: '#/components/schemas/ViewingSlot'
+
+    RejectViewingAppointmentRequest:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Lý do từ chối lịch hẹn (bắt buộc, không được để trống)
+          example: "Không thể tiếp khách vào thời gian này do bận công tác."
+
+    RejectViewingAppointmentResponse:
+      type: object
+      required:
+        - appointmentId
+        - status
+        - rejectionReason
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        status:
+          type: string
+          enum: [REJECTED]
+          example: "REJECTED"
+        rejectionReason:
+          type: string
+          example: "Không thể tiếp khách vào thời gian này do bận công tác."
+
+    CancelViewingAppointmentRequest:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Lý do hủy lịch hẹn (bắt buộc, không được để trống)
+          example: "Thay đổi kế hoạch cá nhân."
+
+    CancelViewingAppointmentResponse:
+      type: object
+      required:
+        - appointmentId
+        - status
+        - cancellationReason
+      properties:
+        appointmentId:
+          type: string
+          format: uuid
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        status:
+          type: string
+          enum: [CANCELLED]
+          example: "CANCELLED"
+        cancellationReason:
+          type: string
+          example: "Thay đổi kế hoạch cá nhân."
+
+  responses:
+    ValidationError:
+      description: Dữ liệu đầu vào không hợp lệ về định dạng, phạm vi hoặc quy tắc kiểm tra
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            errors:
+              proposedSlots:
+                - "Phải cung cấp từ 1 đến 3 khung giờ xem phòng"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Unauthorized:
+      description: Chưa xác thực (thiếu, sai hoặc hết hạn Bearer JWT Token)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Forbidden:
+      description: Không có quyền thực hiện thao tác này hoặc tài khoản bị khóa
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FORBIDDEN"
+            message: "Bạn không có quyền thực hiện thao tác này"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    RoomNotFound:
+      description: Phòng trọ không tồn tại hoặc không đủ điều kiện công khai để đặt lịch xem phòng
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "ROOM_NOT_FOUND"
+            message: "Phòng trọ không tồn tại hoặc không khả dụng để đặt lịch xem phòng"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    AppointmentNotFound:
+      description: Lịch hẹn không tồn tại hoặc người dùng không có quyền truy cập
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "APPOINTMENT_NOT_FOUND"
+            message: "Lịch hẹn không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    InternalError:
+      description: Lỗi máy chủ nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
