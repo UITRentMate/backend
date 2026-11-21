@@ -183,7 +183,7 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
       assert.equal(body.code, 'PROPERTY_NOT_FOUND');
     });
 
-    test('trả về 409 ROOM_CODE_ALREADY_EXISTS khi mã phòng đã tồn tại trong khu trọ', async () => {
+    test('trả về 409 DUPLICATE_ROOM_CODE khi mã phòng đã tồn tại trong khu trọ', async () => {
       stub(prisma.user, 'findUnique', async () => mockLandlord);
       stub(prisma.property, 'count', async () => 1);
       stub(prisma.room, 'count', async () => 1); // duplicate roomCode
@@ -209,7 +209,7 @@ describe('Room Management API Integration Tests (BE-P2-02)', () => {
       );
 
       assert.equal(response.status, 409);
-      assert.equal(body.code, 'ROOM_CODE_ALREADY_EXISTS');
+      assert.equal(body.code, 'DUPLICATE_ROOM_CODE');
     });
 
     test('trả về 201 Created khi landlord hợp lệ và dữ liệu hợp lệ', async () => {

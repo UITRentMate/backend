@@ -129,7 +129,7 @@ describe('RoomManagementService Unit Tests', () => {
       );
     });
 
-    test('ném 409 ROOM_CODE_ALREADY_EXISTS khi mã phòng đã tồn tại trong khu trọ', async () => {
+    test('ném 409 DUPLICATE_ROOM_CODE khi mã phòng đã tồn tại trong khu trọ', async () => {
       stub(RoomManagementRepository, 'checkPropertyOwnership', async () => true);
       stub(RoomManagementRepository, 'checkDuplicateRoomCode', async () => true);
 
@@ -147,7 +147,7 @@ describe('RoomManagementService Unit Tests', () => {
         (err: unknown) => {
           assert.ok(err instanceof ApiError);
           assert.equal(err.statusCode, 409);
-          assert.equal(err.code, 'ROOM_CODE_ALREADY_EXISTS');
+          assert.equal(err.code, 'DUPLICATE_ROOM_CODE');
           return true;
         },
       );
@@ -299,7 +299,7 @@ describe('RoomManagementService Unit Tests', () => {
       );
     });
 
-    test('ném 409 ROOM_CODE_ALREADY_EXISTS khi trùng mã phòng với phòng khác trong cùng khu trọ', async () => {
+    test('ném 409 DUPLICATE_ROOM_CODE khi trùng mã phòng với phòng khác trong cùng khu trọ', async () => {
       stub(RoomManagementRepository, 'findLandlordRoomById', async () => mockRawRoom);
       stub(RoomManagementRepository, 'checkDuplicateRoomCode', async () => true);
 
@@ -317,7 +317,7 @@ describe('RoomManagementService Unit Tests', () => {
         (err: unknown) => {
           assert.ok(err instanceof ApiError);
           assert.equal(err.statusCode, 409);
-          assert.equal(err.code, 'ROOM_CODE_ALREADY_EXISTS');
+          assert.equal(err.code, 'DUPLICATE_ROOM_CODE');
           return true;
         },
       );
