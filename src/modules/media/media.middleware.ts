@@ -1,9 +1,11 @@
 import type { Request, Response, NextFunction, RequestHandler } from 'express';
 import multer from 'multer';
 import { ApiError } from '../../common/errors/api-error';
-import { validateImageBufferMagicBytes } from '../../common/utils/cloudinary.util';
+import {
+  ALLOWED_IMAGE_MIME_TYPES,
+  validateUploadedImageFile,
+} from '../../common/utils/cloudinary.util';
 
-const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5 MiB
 
 const memoryStorage = multer.memoryStorage();
@@ -14,7 +16,7 @@ const baseMulter = multer({
     fileSize: MAX_FILE_SIZE,
   },
   fileFilter: (_req, file, cb) => {
-    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+    if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.mimetype as (typeof ALLOWED_IMAGE_MIME_TYPES)[number])) {
       return cb(
         new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Chỉ hỗ trợ file ảnh định dạng JPEG, PNG hoặc WebP')
       );
@@ -45,14 +47,14 @@ export function uploadSingleImage(fieldName: string): RequestHandler {
         return next(new ApiError(400, 'FILE_REQUIRED', 'Vui lòng chọn file ảnh để tải lên'));
       }
 
-      // Xác thực Magic Bytes nhị phân chống giả mạo
-      const magicBytesCheck = validateImageBufferMagicBytes(req.file.buffer);
-      if (!magicBytesCheck.valid) {
+      // Xác thực cả MIME type và Magic Bytes nhị phân chống giả mạo
+      const validation = validateUploadedImageFile(req.file.mimetype, req.file.buffer);
+      if (!validation.valid) {
         return next(
           new ApiError(
             415,
             'UNSUPPORTED_MEDIA_TYPE',
-            'Nội dung file không đúng định dạng ảnh hợp lệ (chỉ hỗ trợ JPEG, PNG, WebP)'
+            validation.reason ?? 'Nội dung file không đúng định dạng ảnh hợp lệ (chỉ hỗ trợ JPEG, PNG, WebP)'
           )
         );
       }

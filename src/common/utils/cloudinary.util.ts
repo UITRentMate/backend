@@ -115,3 +115,45 @@ export function validateImageBufferMagicBytes(buffer: Buffer): { valid: boolean;
 
   return { valid: false };
 }
+
+export const ALLOWED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
+
+const MIME_TO_MAGIC_FORMAT: Record<string, string> = {
+  'image/jpeg': 'jpeg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+};
+
+/**
+ * Xác thực file ảnh kết hợp cả MIME type được khai báo và chữ ký nhị phân (Magic Bytes).
+ * Đảm bảo file thuộc nhóm JPEG, PNG, WebP và nội dung nhị phân khớp với MIME type.
+ */
+export function validateUploadedImageFile(
+  mimetype: string,
+  buffer: Buffer,
+): { valid: boolean; format?: string; reason?: string } {
+  const expectedFormat = MIME_TO_MAGIC_FORMAT[mimetype];
+  if (!expectedFormat) {
+    return {
+      valid: false,
+      reason: 'Định dạng MIME không được hỗ trợ. Chỉ chấp nhận JPEG, PNG hoặc WebP',
+    };
+  }
+
+  const magicCheck = validateImageBufferMagicBytes(buffer);
+  if (!magicCheck.valid) {
+    return {
+      valid: false,
+      reason: 'Nội dung file không đúng định dạng ảnh hợp lệ (chỉ hỗ trợ JPEG, PNG, WebP)',
+    };
+  }
+
+  if (magicCheck.format !== expectedFormat) {
+    return {
+      valid: false,
+      reason: 'Định dạng MIME khai báo không khớp với nội dung nhị phân của file ảnh',
+    };
+  }
+
+  return { valid: true, format: magicCheck.format };
+}
