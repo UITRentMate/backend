@@ -653,6 +653,53 @@ export class RoomManagementRepository {
   }
 
   /**
+   * Tạo bản ghi ảnh phòng trọ trong transaction Serializable để bảo vệ trần tối đa 10 ảnh khi nhiều request upload đồng thời.
+   * Tự động tính sortOrder = MAX(sortOrder) + 1 bên trong transaction.
+   */
+  public static async createRoomImageWithinLimit(data: {
+    id?: string;
+    roomId: string;
+    imageUrl: string;
+    maxImages?: number;
+  }) {
+    const maxImages = data.maxImages ?? 10;
+
+    return withSerializableRetry(async (tx: Prisma.TransactionClient) => {
+      const currentCount = await tx.roomImage.count({
+        where: { roomId: data.roomId },
+      });
+
+      if (currentCount >= maxImages) {
+        throw new ApiError(
+          400,
+          'ROOM_IMAGE_LIMIT_EXCEEDED',
+          `Phòng trọ đã đạt giới hạn tối đa ${maxImages} ảnh`,
+        );
+      }
+
+      const aggregate = await tx.roomImage.aggregate({
+        where: { roomId: data.roomId },
+        _max: { sortOrder: true },
+      });
+      const nextSortOrder = (aggregate._max.sortOrder ?? -1) + 1;
+
+      const image = await tx.roomImage.create({
+        data: {
+          id: data.id,
+          roomId: data.roomId,
+          imageUrl: data.imageUrl,
+          sortOrder: nextSortOrder,
+        },
+      });
+
+      return {
+        image,
+        remainingSlots: Math.max(0, maxImages - (currentCount + 1)),
+      };
+    });
+  }
+
+  /**
    * Tìm ảnh phòng theo id và roomId
    */
   public static async findRoomImageById(roomId: string, imageId: string) {

@@ -4,7 +4,7 @@ import { RoomManagementRepository } from './room-management.repository';
 import {
   buildRoomImagePublicId,
   extractCloudinaryPublicId,
-  validateImageBufferMagicBytes,
+  validateUploadedImageFile,
 } from '../../common/utils/cloudinary.util';
 import { mediaService } from '../media/media.service';
 import type {
@@ -474,20 +474,34 @@ export class RoomManagementService {
       });
     }
 
-    let currentSortOrder = await RoomManagementRepository.getMaxRoomImageSortOrder(roomId);
+    let capacityExhausted = false;
+    let latestDbRemainingSlots = remainingSlots;
 
     for (let i = 0; i < filesToProcess.length; i++) {
       const file = filesToProcess[i];
 
-      // Kiểm tra magic bytes
-      const magicCheck = validateImageBufferMagicBytes(file.buffer);
-      if (!magicCheck.valid) {
+      if (capacityExhausted) {
+        failed.push({
+          index: i,
+          originalName: file.originalname,
+          size: file.size,
+          code: 'ROOM_IMAGE_LIMIT_EXCEEDED',
+          message: 'Vượt quá giới hạn tối đa 10 ảnh của phòng trọ',
+        });
+        continue;
+      }
+
+      // Kiểm tra cả MIME type khai báo và chữ ký nhị phân (Magic Bytes)
+      const fileValidation = validateUploadedImageFile(file.mimetype, file.buffer);
+      if (!fileValidation.valid) {
         failed.push({
           index: i,
           originalName: file.originalname,
           size: file.size,
           code: 'UNSUPPORTED_MEDIA_TYPE',
-          message: 'Định dạng file không hợp lệ hoặc bị giả mạo. Chỉ chấp nhận JPEG, PNG, WebP',
+          message:
+            fileValidation.reason ??
+            'Định dạng file không hợp lệ hoặc bị giả mạo. Chỉ chấp nhận JPEG, PNG, WebP',
         });
         continue;
       }
@@ -495,7 +509,7 @@ export class RoomManagementService {
       const imageId = randomUUID();
       const publicId = buildRoomImagePublicId(roomId, imageId);
 
-      // Stream upload lên Cloudinary
+      // Stream upload lên Cloudinary (thực hiện ngoài DB transaction để không giữ lock lâu)
       let uploadResult;
       try {
         uploadResult = await mediaService.uploadStream(file.buffer, { publicId });
@@ -510,40 +524,57 @@ export class RoomManagementService {
         continue;
       }
 
-      // Lưu vào database
-      currentSortOrder++;
+      // Lưu vào database trong transaction Serializable kiểm soát giới hạn 10 ảnh đồng thời
       try {
-        const createdImage = await RoomManagementRepository.createRoomImage({
+        const dbResult = await RoomManagementRepository.createRoomImageWithinLimit({
           id: imageId,
           roomId,
           imageUrl: uploadResult.secureUrl,
-          sortOrder: currentSortOrder,
+          maxImages: 10,
         });
 
+        latestDbRemainingSlots = dbResult.remainingSlots;
         uploaded.push({
           index: i,
           originalName: file.originalname,
           size: file.size,
-          id: createdImage.id,
-          url: createdImage.imageUrl,
+          id: dbResult.image.id,
+          url: dbResult.image.imageUrl,
           publicId: uploadResult.publicId,
-          sortOrder: createdImage.sortOrder,
+          sortOrder: dbResult.image.sortOrder,
         });
       } catch (dbError: any) {
-        // Bù trừ: Xóa ảnh trên Cloudinary nếu DB insert lỗi
+        // Bù trừ: Xóa ngay ảnh vừa upload lên Cloudinary khi DB vượt trần hoặc insert lỗi
         await mediaService.deleteResource(uploadResult.publicId);
-        currentSortOrder--;
-        failed.push({
-          index: i,
-          originalName: file.originalname,
-          size: file.size,
-          code: 'DB_INSERT_FAILED',
-          message: dbError?.message || 'Lỗi lưu thông tin ảnh vào cơ sở dữ liệu',
-        });
+
+        if (dbError instanceof ApiError && dbError.code === 'ROOM_IMAGE_LIMIT_EXCEEDED') {
+          capacityExhausted = true;
+          latestDbRemainingSlots = 0;
+          failed.push({
+            index: i,
+            originalName: file.originalname,
+            size: file.size,
+            code: 'ROOM_IMAGE_LIMIT_EXCEEDED',
+            message: 'Vượt quá giới hạn tối đa 10 ảnh của phòng trọ',
+          });
+        } else {
+          failed.push({
+            index: i,
+            originalName: file.originalname,
+            size: file.size,
+            code: 'DB_INSERT_FAILED',
+            message: dbError?.message || 'Lỗi lưu thông tin ảnh vào cơ sở dữ liệu',
+          });
+        }
       }
     }
 
     failed.sort((a, b) => a.index - b.index);
+
+    const calculatedRemainingFromInitial = Math.max(0, 10 - (currentCount + uploaded.length));
+    const finalRemainingSlots = capacityExhausted
+      ? 0
+      : Math.min(latestDbRemainingSlots, calculatedRemainingFromInitial);
 
     const payload: BatchUploadResponse = {
       success: uploaded.length > 0,
@@ -551,7 +582,7 @@ export class RoomManagementService {
         totalRequested: files.length,
         succeeded: uploaded.length,
         failed: failed.length,
-        remainingSlots: Math.max(0, 10 - (currentCount + uploaded.length)),
+        remainingSlots: finalRemainingSlots,
       },
       uploaded,
       failed,
