@@ -12,15 +12,19 @@ datasource db {
 // ==========================================
 
 model User {
-  id            String   @id @default(uuid()) @db.Uuid
-  fullName      String   @map("full_name") @db.VarChar(150)
-  email         String   @unique @db.VarChar(255)
-  phone         String   @unique @db.VarChar(20)
-  passwordHash  String   @map("password_hash") @db.Text
-  role          String   @db.VarChar(20)
-  accountStatus String   @map("account_status") @db.VarChar(25)
-  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                       String    @id @default(uuid()) @db.Uuid
+  fullName                 String    @map("full_name") @db.VarChar(150)
+  email                    String    @unique @db.VarChar(255)
+  phone                    String    @unique @db.VarChar(20)
+  passwordHash             String    @map("password_hash") @db.Text
+  role                     String    @db.VarChar(20)
+  accountStatus            String    @map("account_status") @db.VarChar(25)
+  avatarUrl                String?   @map("avatar_url") @db.Text
+  avatarCloudinaryPublicId String?   @map("avatar_cloudinary_public_id") @db.VarChar(255)
+  dateOfBirth              DateTime? @map("date_of_birth") @db.Date
+  address                  String?   @db.Text
+  createdAt                DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   // Relations
   landlordApplicationsAsApplicant LandlordApplication[] @relation("ApplicantUser")
@@ -47,7 +51,8 @@ model User {
   complaintsHandled               Complaint[]           @relation("ComplaintHandledBy")
   auditLogs                       AuditLog[]
   notifications                   Notification[]
-  refreshSessions                RefreshSession[]
+  refreshSessions                 RefreshSession[]
+  passwordResetTokens             PasswordResetToken[]
 
   @@map("users")
 }
@@ -66,6 +71,20 @@ model RefreshSession {
   @@index([userId])
   @@index([familyId])
   @@map("refresh_sessions")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("password_reset_tokens")
 }
 
 model LandlordApplication {
@@ -263,23 +282,26 @@ model RentalRequest {
 }
 
 model Contract {
-  id                String    @id @default(uuid()) @db.Uuid
-  roomId            String    @map("room_id") @db.Uuid
-  tenantId          String    @map("tenant_id") @db.Uuid
-  rentalRequestId   String?   @map("rental_request_id") @db.Uuid
-  renewedFromId     String?   @map("renewed_from_id") @db.Uuid
-  startDate         DateTime  @map("start_date") @db.Date
-  endDate           DateTime  @map("end_date") @db.Date
-  status            String    @db.VarChar(28)
-  pendingMoveout    Boolean   @default(false) @map("pending_moveout")
-  rentSnapshot      Decimal   @map("rent_snapshot") @db.Decimal(14, 2)
-  depositSnapshot   Decimal   @map("deposit_snapshot") @db.Decimal(14, 2)
-  electricityRate   Decimal   @map("electricity_rate") @db.Decimal(12, 2)
-  waterRate         Decimal   @map("water_rate") @db.Decimal(12, 2)
-  depositCarried    Decimal   @default(0) @map("deposit_carried") @db.Decimal(14, 2)
-  acceptedAt        DateTime? @map("accepted_at") @db.Timestamptz(6)
-  depositDeadlineAt DateTime? @map("deposit_deadline_at") @db.Timestamptz(6)
-  activatedAt       DateTime? @map("activated_at") @db.Timestamptz(6)
+  id                 String    @id @default(uuid()) @db.Uuid
+  roomId             String    @map("room_id") @db.Uuid
+  tenantId           String    @map("tenant_id") @db.Uuid
+  rentalRequestId    String?   @map("rental_request_id") @db.Uuid
+  renewedFromId      String?   @map("renewed_from_id") @db.Uuid
+  startDate          DateTime  @map("start_date") @db.Date
+  endDate            DateTime  @map("end_date") @db.Date
+  status             String    @db.VarChar(32)
+  pendingMoveout     Boolean   @default(false) @map("pending_moveout")
+  rentSnapshot       Decimal   @map("rent_snapshot") @db.Decimal(14, 2)
+  depositSnapshot    Decimal   @map("deposit_snapshot") @db.Decimal(14, 2)
+  electricityRate    Decimal   @map("electricity_rate") @db.Decimal(12, 2)
+  waterRate          Decimal   @map("water_rate") @db.Decimal(12, 2)
+  depositCarried     Decimal   @default(0) @map("deposit_carried") @db.Decimal(14, 2)
+  holdExpiresAt      DateTime? @map("hold_expires_at") @db.Timestamptz(6)
+  tenantNote         String?   @map("tenant_note") @db.Text
+  cancellationReason String?   @map("cancellation_reason") @db.Text
+  acceptedAt         DateTime? @map("accepted_at") @db.Timestamptz(6)
+  depositDeadlineAt  DateTime? @map("deposit_deadline_at") @db.Timestamptz(6)
+  activatedAt        DateTime? @map("activated_at") @db.Timestamptz(6)
 
   // Relations
   room                Room                 @relation(fields: [roomId], references: [id], onDelete: Restrict)
@@ -355,6 +377,7 @@ model ResidentInvitation {
   invitedUser User     @relation("InvitedUser", fields: [invitedUserId], references: [id], onDelete: Restrict)
   invitedBy   User     @relation("InvitedByUser", fields: [invitedById], references: [id], onDelete: Restrict)
 
+  @@index([invitedUserId, status])
   @@map("resident_invitations")
 }
 
@@ -515,17 +538,21 @@ model Liquidation {
 }
 
 model RepairTicket {
-  id          String    @id @default(uuid()) @db.Uuid
-  propertyId  String    @map("property_id") @db.Uuid
-  roomId      String?   @map("room_id") @db.Uuid
-  createdById String    @map("created_by_id") @db.Uuid
-  title       String    @db.VarChar(200)
-  description String    @db.Text
-  status      String    @db.VarChar(28)
-  scheduledAt DateTime? @map("scheduled_at") @db.Timestamptz(6)
-  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
-  closedAt    DateTime? @map("closed_at") @db.Timestamptz(6)
-  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  id             String    @id @default(uuid()) @db.Uuid
+  propertyId     String    @map("property_id") @db.Uuid
+  roomId         String?   @map("room_id") @db.Uuid
+  createdById    String    @map("created_by_id") @db.Uuid
+  title          String    @db.VarChar(200)
+  description    String    @db.Text
+  priority       String    @default("MEDIUM") @db.VarChar(20)
+  status         String    @db.VarChar(28)
+  resolutionPlan String?   @map("resolution_plan") @db.Text
+  repairCost     Decimal?  @map("repair_cost") @db.Decimal(14, 2)
+  costBearer     String?   @map("cost_bearer") @db.VarChar(20)
+  scheduledAt    DateTime? @map("scheduled_at") @db.Timestamptz(6)
+  completedAt    DateTime? @map("completed_at") @db.Timestamptz(6)
+  closedAt       DateTime? @map("closed_at") @db.Timestamptz(6)
+  createdAt      DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
   // Relations
   property    Property           @relation(fields: [propertyId], references: [id], onDelete: Restrict)
@@ -534,6 +561,7 @@ model RepairTicket {
   attachments RepairAttachment[]
   complaints  Complaint[]
 
+  @@index([propertyId, status])
   @@map("repair_tickets")
 }
 
@@ -645,5 +673,6 @@ model Notification {
   // Relations
   recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
 
+  @@index([recipientId, isRead, createdAt(sort: Desc)])
   @@map("notifications")
 }
