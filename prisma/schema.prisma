@@ -242,7 +242,10 @@ model RentalRequest {
   roomId           String    @map("room_id") @db.Uuid
   tenantId         String    @map("tenant_id") @db.Uuid
   desiredStartDate DateTime  @map("desired_start_date") @db.Date
+  durationMonths   Int?      @map("duration_months")
+  message          String?   @db.Text
   status           String    @db.VarChar(20)
+  rejectionReason  String?   @map("rejection_reason") @db.Text
   reviewedAt       DateTime? @map("reviewed_at") @db.Timestamptz(6)
   createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -251,6 +254,8 @@ model RentalRequest {
   tenant    User       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   contracts Contract[]
 
+  @@index([roomId])
+  @@index([tenantId])
   @@map("rental_requests")
 }
 

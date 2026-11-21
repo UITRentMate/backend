@@ -4,6 +4,7 @@ import { errorHandler } from './common/middleware/error-handler';
 
 import { authRoutes } from './modules/auth/auth.routes';
 import { propertyRouter } from './modules/properties/property.routes';
+import { rentalRequestRouter } from './modules/rental-requests/rental-request.routes';
 import { roomRouter } from './modules/rooms/room.routes';
 import { usersRoutes } from './modules/users/users.routes';
 
@@ -55,6 +56,9 @@ app.use(roomRouter);
 
 // Phân hệ Quản lý & Chi tiết Khu trọ (BE-P2-01)
 app.use(propertyRouter);
+
+// Phân hệ Yêu cầu thuê phòng (BE-P2-06 / Issue #19)
+app.use(rentalRequestRouter);
 
 // Global Error Handler Middleware
 app.use(errorHandler);
