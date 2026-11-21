@@ -16,6 +16,21 @@ test('Live DB: simultaneous duplicate rental requests yield one PENDING request'
     return;
   }
 
+  const requiredColumns = ['duration_months', 'message', 'rejection_reason'];
+  const columnRows = await prisma.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = current_schema()
+      AND table_name = 'rental_requests'
+      AND column_name IN ('duration_months', 'message', 'rejection_reason')
+  `;
+  const existingColumns = new Set(columnRows.map(({ column_name }) => column_name));
+  const missingColumns = requiredColumns.filter((column) => !existingColumns.has(column));
+  if (missingColumns.length > 0) {
+    t.skip('Rental request migration is not applied; missing columns: ' + missingColumns.join(', '));
+    return;
+  }
+
   const suffix = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
   const userIds: string[] = [];
   let propertyId: string | undefined;
