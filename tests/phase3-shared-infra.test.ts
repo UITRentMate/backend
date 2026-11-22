@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
+import { Prisma } from '@prisma/client';
 import {
   CONTRACT_STATUS,
   DEPOSIT_RECEIPT_STATUS,
@@ -16,7 +17,11 @@ import {
   REPAIR_TICKET_STATUS,
   RESIDENT_INVITATION_STATUS,
 } from '../src/common/constants/phase3-status';
-import { normalizeNotificationTitle } from '../src/common/utils/notification.util';
+import {
+  createNotification,
+  createNotificationsBatch,
+  normalizeNotificationTitle,
+} from '../src/common/utils/notification.util';
 import {
   buildPasswordResetEmailContent,
   loadSmtpConfigFromEnv,
@@ -90,6 +95,54 @@ describe('Phase 3 Shared Status Constants', () => {
     const longTitle = `  ${'A'.repeat(250)}  `;
     assert.equal(normalizeNotificationTitle(longTitle).length, 200);
     assert.equal(normalizeNotificationTitle('  Thông báo mới  '), 'Thông báo mới');
+
+    // Emoji nằm đúng ranh giới 200 UTF-16 code units không được tách đôi surrogate pair
+    const titleWithBoundaryEmoji = `${'A'.repeat(199)}🏠BC`;
+    const normalizedEmojiTitle = normalizeNotificationTitle(titleWithBoundaryEmoji);
+    assert.equal([...normalizedEmojiTitle].length, 200);
+    assert.ok(normalizedEmojiTitle.endsWith('🏠'));
+    assert.equal(Buffer.from(normalizedEmojiTitle, 'utf8').toString('utf8'), normalizedEmojiTitle);
+  });
+
+  test('createNotification và createNotificationsBatch chuẩn hóa title và map payload null sang Prisma.JsonNull', async () => {
+    let singleArgs: any;
+    let batchArgs: any;
+    const fakeDb: any = {
+      notification: {
+        create: async (args: any) => {
+          singleArgs = args;
+          return { id: 'n-1', ...args.data };
+        },
+        createMany: async (args: any) => {
+          batchArgs = args;
+          return { count: args.data.length };
+        },
+      },
+    };
+
+    const longTitle = `${'X'.repeat(199)}🎉YZ`;
+    await createNotification(fakeDb, {
+      recipientId: 'user-1',
+      title: longTitle,
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: null,
+    });
+
+    assert.equal([...singleArgs.data.title].length, 200);
+    assert.ok(singleArgs.data.title.endsWith('🎉'));
+    assert.equal(singleArgs.data.payload, Prisma.JsonNull);
+
+    await createNotificationsBatch(fakeDb, [
+      {
+        recipientId: 'user-2',
+        title: `  ${'Y'.repeat(210)}  `,
+        eventType: NOTIFICATION_EVENT_TYPE.RENTAL_REQUEST_AUTO_REJECTED,
+        payload: null,
+      },
+    ]);
+
+    assert.equal([...batchArgs.data[0].title].length, 200);
+    assert.equal(batchArgs.data[0].payload, Prisma.JsonNull);
   });
 });
 

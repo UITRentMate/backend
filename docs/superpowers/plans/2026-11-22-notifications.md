@@ -8,7 +8,7 @@
 
 **Tech Stack:** Express 5.3.0, TypeScript (CommonJS), Prisma Client 6.19.3, PostgreSQL, Zod 4.6.7, Node.js Native Test Runner (`node:test`, `node:assert/strict`).
 
-**Spec:** [docs/superpowers/specs/2026-11-22-notifications-design.md](file:///C:/Users/ADMIN/orca/workspaces/backend/staging/docs/superpowers/specs/2026-11-22-notifications-design.md)
+**Spec:** [docs/superpowers/specs/2026-11-22-notifications-design.md](../specs/2026-11-22-notifications-design.md)
 
 ## Global Constraints
 

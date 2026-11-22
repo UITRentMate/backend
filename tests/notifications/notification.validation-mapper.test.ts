@@ -69,6 +69,26 @@ describe('Notification Validation & Mapper', () => {
       () => validateNotificationListQuery({ eventType: 'invalid-lower' }),
       (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
     );
+    assert.throws(
+      () => validateNotificationListQuery({ eventType: 'A'.repeat(41) }),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+    );
+    assert.throws(
+      () => validateNotificationListQuery({ isRead: 'yes' }),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+    );
+    assert.throws(
+      () => validateNotificationListQuery({ page: '1.5' }),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+    );
+    assert.throws(
+      () => validateNotificationListQuery({ page: ['1'] }),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+    );
+    assert.throws(
+      () => validateNotificationListQuery({ limit: '   ' }),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+    );
   });
 
   test('mapToNotificationDTO trích xuất payload chuẩn và fallback an toàn với dữ liệu lạ/null', () => {

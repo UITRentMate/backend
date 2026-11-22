@@ -22,14 +22,16 @@ export interface CreateNotificationInput {
 const MAX_NOTIFICATION_TITLE_LENGTH = 200;
 
 /**
- * Chuẩn hóa tiêu đề thông báo vừa khít giới hạn VARCHAR(200) của PostgreSQL.
+ * Chuẩn hóa tiêu đề thông báo vừa khít giới hạn VARCHAR(200) của PostgreSQL theo Unicode code point
+ * (tránh cắt đôi surrogate pair của emoji gây lỗi UTF-8).
  */
 export function normalizeNotificationTitle(title: string): string {
   const trimmed = title.trim();
-  if (trimmed.length <= MAX_NOTIFICATION_TITLE_LENGTH) {
+  const codePoints = [...trimmed];
+  if (codePoints.length <= MAX_NOTIFICATION_TITLE_LENGTH) {
     return trimmed;
   }
-  return trimmed.slice(0, MAX_NOTIFICATION_TITLE_LENGTH);
+  return codePoints.slice(0, MAX_NOTIFICATION_TITLE_LENGTH).join('');
 }
 
 /**

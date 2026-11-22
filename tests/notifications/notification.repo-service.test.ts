@@ -133,4 +133,63 @@ describe('Notification Repository & Service', () => {
     assert.equal(detail.isRead, true);
     assert.equal(detail.unreadCount, 2);
   });
+
+  test('NotificationRepository.countUnread, markAllAsRead và nhánh idempotency của markOneAsRead', async () => {
+    const userId = '550e8400-e29b-41d4-a716-446655440010';
+    const notifId = '550e8400-e29b-41d4-a716-446655440020';
+
+    stub(prisma.notification, 'count', async (args: any) => {
+      assert.deepEqual(args.where, { recipientId: userId, isRead: false });
+      return 7;
+    });
+    assert.equal(await NotificationRepository.countUnread(userId), 7);
+
+    stub(prisma.notification, 'updateMany', async (args: any) => {
+      assert.deepEqual(args.where, { recipientId: userId, isRead: false });
+      assert.deepEqual(args.data, { isRead: true });
+      return { count: 4 };
+    });
+    assert.deepEqual(await NotificationRepository.markAllAsRead(userId), {
+      updatedCount: 4,
+      unreadCount: 0,
+    });
+
+    // Nhánh 1: isRead === false -> phải gọi updateMany
+    let updateCalled = 0;
+    stub(prisma, '$transaction', async (work: any) => work(prisma));
+    stub(prisma.notification, 'findFirst', async () => ({
+      id: notifId,
+      recipientId: userId,
+      title: 'Test',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: null,
+      isRead: false,
+      createdAt: new Date(),
+    }));
+    stub(prisma.notification, 'updateMany', async () => {
+      updateCalled += 1;
+      return { count: 1 };
+    });
+    stub(prisma.notification, 'count', async () => 0);
+
+    const firstRead = await NotificationRepository.markOneAsRead(userId, notifId);
+    assert.equal(updateCalled, 1);
+    assert.equal(firstRead?.notification.isRead, true);
+
+    // Nhánh 2: isRead === true -> idempotent, không gọi updateMany lại
+    updateCalled = 0;
+    stub(prisma.notification, 'findFirst', async () => ({
+      id: notifId,
+      recipientId: userId,
+      title: 'Test',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: null,
+      isRead: true,
+      createdAt: new Date(),
+    }));
+
+    const secondRead = await NotificationRepository.markOneAsRead(userId, notifId);
+    assert.equal(updateCalled, 0);
+    assert.equal(secondRead?.notification.isRead, true);
+  });
 });

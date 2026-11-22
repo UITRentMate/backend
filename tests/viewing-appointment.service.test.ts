@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { afterEach, test } from 'node:test';
 import { ApiError } from '../src/common/errors/api-error';
+import { prisma } from '../src/infrastructure/database/prisma';
 import { ViewingAppointmentRepository } from '../src/modules/viewing-appointments/viewing-appointment.repository';
 import { ViewingAppointmentService } from '../src/modules/viewing-appointments/viewing-appointment.service';
 
@@ -70,4 +71,65 @@ test('cancelAppointment passes the opposite party as notification recipient', as
     { reason: 'Bận việc' },
   );
   assert.equal(capturedNotificationMeta.recipientId, tenantId);
+});
+
+test('createAppointment and rejectAppointment pass room and property metadata for notifications', async () => {
+  let createMeta: any;
+  let rejectMeta: any;
+
+  stub(prisma.user, 'findUnique', async () => ({ id: tenantId, phone: '0901234567' }));
+  stub(ViewingAppointmentRepository, 'validateRoomPublicEligibility', async () => ({
+    id: '550e8400-e29b-41d4-a716-446655440010',
+    roomCode: 'P.202',
+    property: {
+      id: '550e8400-e29b-41d4-a716-446655440011',
+      name: 'Khu trọ Hạnh Phúc',
+      landlordId,
+    },
+  }));
+  stub(ViewingAppointmentRepository, 'hasPendingAppointmentForRoom', async () => false);
+  stub(
+    ViewingAppointmentRepository,
+    'createAppointmentWithSlots',
+    async (_tenantId: string, _phone: string, _input: any, meta: any) => {
+      createMeta = meta;
+      return { id: appointmentId, status: 'PENDING' };
+    },
+  );
+
+  await ViewingAppointmentService.createAppointment(tenantId, {
+    roomId: '550e8400-e29b-41d4-a716-446655440010',
+    proposedSlots: ['2026-12-01T09:00:00Z'],
+    contactPhone: '0901234567',
+  });
+  assert.deepEqual(createMeta, {
+    landlordId,
+    roomCode: 'P.202',
+    propertyName: 'Khu trọ Hạnh Phúc',
+  });
+
+  stub(ViewingAppointmentRepository, 'findAppointmentById', async () => ({
+    ...appointment,
+    room: {
+      roomCode: 'P.202',
+      property: { landlordId, name: 'Khu trọ Hạnh Phúc' },
+    },
+  }));
+  stub(
+    ViewingAppointmentRepository,
+    'rejectAppointment',
+    async (_id: string, _reason: string, meta: any) => {
+      rejectMeta = meta;
+      return { id: appointmentId };
+    },
+  );
+
+  await ViewingAppointmentService.rejectAppointment(landlordId, appointmentId, {
+    reason: 'Không tiếp khách',
+  });
+  assert.deepEqual(rejectMeta, {
+    tenantId,
+    roomCode: 'P.202',
+    propertyName: 'Khu trọ Hạnh Phúc',
+  });
 });

@@ -15,8 +15,13 @@ const positiveIntFromQuery = (field: string, min: number, max?: number) =>
       if (value === undefined || value === '') {
         return undefined;
       }
-      const parsed = Number(value);
-      return Number.isInteger(parsed) ? parsed : value;
+      if (typeof value === 'number') {
+        return value;
+      }
+      if (typeof value === 'string' && /^\d+$/.test(value)) {
+        return Number(value);
+      }
+      return value;
     },
     z
       .number({ message: `${field} phải là số nguyên` })

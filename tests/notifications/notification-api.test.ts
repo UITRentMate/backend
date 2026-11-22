@@ -115,9 +115,22 @@ describe('Notifications HTTP API Routes', () => {
     );
     assert.equal(notOwned.response.status, 404);
     assert.equal(notOwned.body.code, 'NOTIFICATION_NOT_FOUND');
+
+    const badPatchId = await request('/api/v1/notifications/not-a-uuid/read', {
+      method: 'PATCH',
+      headers: authHeader(activeTenant.id),
+    });
+    assert.equal(badPatchId.response.status, 400);
+    assert.equal(badPatchId.body.code, 'VALIDATION_ERROR');
+
+    const overLimit = await request('/api/v1/notifications?limit=100', {
+      headers: authHeader(activeTenant.id),
+    });
+    assert.equal(overLimit.response.status, 400);
+    assert.equal(overLimit.body.code, 'VALIDATION_ERROR');
   });
 
-  test('GET /notifications và PATCH /:notificationId/read trả đúng DTO phẳng', async () => {
+  test('GET /notifications, GET /:notificationId và PATCH /:notificationId/read trả đúng DTO phẳng', async () => {
     const notifId = '550e8400-e29b-41d4-a716-446655440030';
     const flatItem = {
       id: notifId,
@@ -142,6 +155,10 @@ describe('Notifications HTTP API Routes', () => {
       totalPages: 1,
       unreadCount: 0,
     }));
+    stub(NotificationService, 'getNotificationDetail', async () => ({
+      ...flatItem,
+      unreadCount: 0,
+    }));
     stub(NotificationService, 'markAsRead', async () => ({
       ...flatItem,
       unreadCount: 0,
@@ -154,6 +171,14 @@ describe('Notifications HTTP API Routes', () => {
     assert.equal(listRes.body.items.length, 1);
     assert.equal(listRes.body.total, 1);
     assert.equal(listRes.body.limit, 20);
+
+    const detailRes = await request(`/api/v1/notifications/${notifId}`, {
+      headers: authHeader(activeTenant.id),
+    });
+    assert.equal(detailRes.response.status, 200);
+    assert.equal(detailRes.body.id, notifId);
+    assert.equal(detailRes.body.isRead, true);
+    assert.equal(detailRes.body.unreadCount, 0);
 
     const markRes = await request(`/api/v1/notifications/${notifId}/read`, {
       method: 'PATCH',

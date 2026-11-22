@@ -119,9 +119,14 @@ test('ViewingAppointmentRepository creates atomic notifications on create, confi
 
 test('confirmAppointmentInTx maps a serializable conflict to a slot conflict', async () => {
   let transactionOptions: any;
+  let notificationCreated = false;
   stub(prisma, '$transaction', async (_work: unknown, options: any) => {
     transactionOptions = options;
     throw { code: 'P2034' };
+  });
+  stub(prisma.notification, 'create', async () => {
+    notificationCreated = true;
+    return {};
   });
   stub(prisma.viewingAppointment, 'findUnique', async () => ({ status: 'PENDING' }));
 
@@ -130,4 +135,5 @@ test('confirmAppointmentInTx maps a serializable conflict to a slot conflict', a
     (error: unknown) => error instanceof ApiError && error.statusCode === 409 && error.code === 'SLOT_CONFLICT',
   );
   assert.equal(transactionOptions.isolationLevel, 'Serializable');
+  assert.equal(notificationCreated, false);
 });
