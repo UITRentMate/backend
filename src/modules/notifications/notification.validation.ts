@@ -9,7 +9,11 @@ import type { NotificationListQuery } from './notification.types';
 
 const notificationIdSchema = z.string().uuid('Mã thông báo không đúng định dạng UUID');
 
-const positiveIntFromQuery = (field: string, min: number, max?: number) =>
+// Giới hạn page <= 10_000 (với limit tối đa 50 => OFFSET tối đa 499_950, an toàn tuyệt đối dưới INT4 2_147_483_647)
+export const MAX_NOTIFICATION_PAGE = 10_000;
+export const MAX_NOTIFICATION_LIMIT = 50;
+
+const positiveIntFromQuery = (field: string, min: number, max: number) =>
   z.preprocess(
     (value) => {
       if (value === undefined || value === '') {
@@ -25,11 +29,11 @@ const positiveIntFromQuery = (field: string, min: number, max?: number) =>
     },
     z
       .number({ message: `${field} phải là số nguyên` })
-      .int(`${field} phải là số nguyên`)
-      .min(min, `${field} phải lớn hơn hoặc bằng ${min}`)
-      .refine((n) => (max === undefined ? true : n <= max), {
-        message: `${field} không được vượt quá ${max}`,
+      .refine((n) => Number.isSafeInteger(n), {
+        message: `${field} phải là số nguyên hợp lệ`,
       })
+      .min(min, `${field} phải lớn hơn hoặc bằng ${min}`)
+      .max(max, `${field} không được vượt quá ${max}`)
       .optional(),
   );
 
@@ -52,9 +56,9 @@ const categoryValues = Object.values(NOTIFICATION_CATEGORY) as [
 ];
 
 const notificationListQuerySchema = z.object({
-  page: positiveIntFromQuery('page', 1),
-  limit: positiveIntFromQuery('limit', 1, 50),
-  pageSize: positiveIntFromQuery('pageSize', 1, 50),
+  page: positiveIntFromQuery('page', 1, MAX_NOTIFICATION_PAGE),
+  limit: positiveIntFromQuery('limit', 1, MAX_NOTIFICATION_LIMIT),
+  pageSize: positiveIntFromQuery('pageSize', 1, MAX_NOTIFICATION_LIMIT),
   isRead: booleanFromQuery,
   category: z.preprocess(
     (value) => (value === '' ? undefined : value),

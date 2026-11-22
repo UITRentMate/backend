@@ -6,8 +6,13 @@ import {
   NOTIFICATION_CATEGORY,
   NOTIFICATION_EVENT_TYPE,
 } from '../../src/common/constants/phase3-status';
+import {
+  createNotification,
+  normalizeNotificationTitle,
+} from '../../src/common/utils/notification.util';
 import { mapToNotificationDTO } from '../../src/modules/notifications/notification.mapper';
 import {
+  MAX_NOTIFICATION_PAGE,
   validateNotificationId,
   validateNotificationListQuery,
 } from '../../src/modules/notifications/notification.validation';
@@ -91,6 +96,28 @@ describe('Notification Validation & Mapper', () => {
     );
   });
 
+  test('validateNotificationListQuery chặn giá trị page vượt giới hạn an toàn (INT4 và Number.MAX_SAFE_INTEGER)', () => {
+    assert.deepEqual(validateNotificationListQuery({ page: String(MAX_NOTIFICATION_PAGE), limit: '50' }), {
+      page: MAX_NOTIFICATION_PAGE,
+      limit: 50,
+    });
+
+    const oversizedPages = [
+      String(MAX_NOTIFICATION_PAGE + 1),
+      '100000000', // 100_000_000 * 50 vượt INT4 OFFSET (2_147_483_647)
+      '2147483648', // INT4 max + 1
+      String(Number.MAX_SAFE_INTEGER + 1),
+      '99999999999999999999999',
+    ];
+
+    for (const page of oversizedPages) {
+      assert.throws(
+        () => validateNotificationListQuery({ page, limit: '50' }),
+        (err: unknown) => err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+      );
+    }
+  });
+
   test('mapToNotificationDTO trích xuất payload chuẩn và fallback an toàn với dữ liệu lạ/null', () => {
     const createdAt = new Date('2026-11-22T03:00:00.000Z');
     const dto = mapToNotificationDTO({
@@ -145,5 +172,76 @@ describe('Notification Validation & Mapper', () => {
     assert.equal(fallbackDto.relatedEntityType, null);
     assert.equal(fallbackDto.relatedEntityId, null);
     assert.equal(fallbackDto.payload, null);
+
+    const emptyContentDto = mapToNotificationDTO({
+      id: '550e8400-e29b-41d4-a716-446655440004',
+      recipientId: '550e8400-e29b-41d4-a716-446655440002',
+      title: 'Thông báo nội dung rỗng',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: { content: '' },
+      isRead: false,
+      createdAt,
+    });
+
+    assert.equal(emptyContentDto.content, null);
+    assert.deepEqual(emptyContentDto.payload, { content: '' });
+  });
+
+  test('normalizeNotificationTitle từ chối chuỗi rỗng hoặc chỉ chứa khoảng trắng và createNotification kiểm tra payload JSON an toàn', async () => {
+    for (const blank of ['', ' ', '   \t\n  ']) {
+      assert.throws(() => normalizeNotificationTitle(blank), /Tiêu đề thông báo không được để trống/);
+    }
+
+    let capturedData: any;
+    const fakeDb: any = {
+      notification: {
+        create: async (args: any) => {
+          capturedData = args.data;
+          return { id: 'n-test', ...args.data };
+        },
+      },
+    };
+
+    const at = new Date('2026-11-22T05:00:00.000Z');
+    await createNotification(fakeDb, {
+      recipientId: 'user-1',
+      title: '  Thông báo có payload hợp lệ  ',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: {
+        content: 'Nội dung',
+        actionUrl: undefined,
+        metadata: { amount: 1000, optional: undefined, at: at as unknown as string },
+      },
+    });
+
+    assert.equal(capturedData.title, 'Thông báo có payload hợp lệ');
+    assert.deepEqual(capturedData.payload, {
+      content: 'Nội dung',
+      metadata: { amount: 1000, at: '2026-11-22T05:00:00.000Z' },
+    });
+
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: 'user-1',
+          title: 'Payload lỗi',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: { fn: () => {} } as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: 'user-1',
+          title: 'Payload vòng lặp',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: circular as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
   });
 });

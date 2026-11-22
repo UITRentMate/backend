@@ -151,6 +151,38 @@ test('Live DB: Notifications CRUD, filtering, Anti-IDOR, idempotent mark-read & 
     assert.equal(mismatchList.response.status, 200);
     assert.equal(mismatchList.body.total, 0);
 
+    // 2b. Kiểm tra phân trang: page, limit, pageSize, page > totalPages và chặn page quá lớn
+    const page1Res = await apiRequest('/api/v1/notifications?page=1&limit=2', tokenA);
+    assert.equal(page1Res.response.status, 200);
+    assert.equal(page1Res.body.items.length, 2);
+    assert.equal(page1Res.body.total, 3);
+    assert.equal(page1Res.body.page, 1);
+    assert.equal(page1Res.body.limit, 2);
+    assert.equal(page1Res.body.totalPages, 2);
+    assert.equal(page1Res.body.unreadCount, 3);
+
+    const page2Res = await apiRequest('/api/v1/notifications?page=2&pageSize=2', tokenA);
+    assert.equal(page2Res.response.status, 200);
+    assert.equal(page2Res.body.items.length, 1);
+    assert.equal(page2Res.body.total, 3);
+    assert.equal(page2Res.body.page, 2);
+    assert.equal(page2Res.body.limit, 2);
+    assert.equal(page2Res.body.totalPages, 2);
+    assert.equal(page2Res.body.unreadCount, 3);
+    const page1Ids = new Set(page1Res.body.items.map((item: { id: string }) => item.id));
+    assert.ok(!page1Ids.has(page2Res.body.items[0].id));
+
+    const outOfRangePageRes = await apiRequest('/api/v1/notifications?page=5&limit=2', tokenA);
+    assert.equal(outOfRangePageRes.response.status, 200);
+    assert.deepEqual(outOfRangePageRes.body.items, []);
+    assert.equal(outOfRangePageRes.body.total, 3);
+    assert.equal(outOfRangePageRes.body.totalPages, 2);
+    assert.equal(outOfRangePageRes.body.unreadCount, 3);
+
+    const oversizedPageRes = await apiRequest('/api/v1/notifications?page=100000000&limit=50', tokenA);
+    assert.equal(oversizedPageRes.response.status, 400);
+    assert.equal(oversizedPageRes.body.code, 'VALIDATION_ERROR');
+
     // 3. Anti-IDOR: Tenant B truy cập / đọc thông báo của Tenant A phải trả 404 và không sửa isRead
     const idorDetail = await apiRequest(`/api/v1/notifications/${nFinance.id}`, tokenB);
     assert.equal(idorDetail.response.status, 404);
@@ -175,6 +207,15 @@ test('Live DB: Notifications CRUD, filtering, Anti-IDOR, idempotent mark-read & 
     assert.equal(detail2.response.status, 200);
     assert.equal(detail2.body.isRead, true);
     assert.equal(detail2.body.unreadCount, 2);
+
+    // 4b. Kiểm tra lọc isRead=false sau khi đã đọc 1/3 thông báo
+    const unreadOnlyList = await apiRequest('/api/v1/notifications?isRead=false&page=1&limit=10', tokenA);
+    assert.equal(unreadOnlyList.response.status, 200);
+    assert.equal(unreadOnlyList.body.total, 2);
+    assert.equal(unreadOnlyList.body.unreadCount, 2);
+    assert.equal(unreadOnlyList.body.items.length, 2);
+    assert.ok(unreadOnlyList.body.items.every((item: { isRead: boolean }) => item.isRead === false));
+    assert.ok(unreadOnlyList.body.items.every((item: { id: string }) => item.id !== nFinance.id));
 
     // 5. PATCH /:id/read hoạt động và idempotent
     const patchRead = await apiRequest(`/api/v1/notifications/${nRepair.id}/read`, tokenA, {
@@ -296,6 +337,35 @@ test('Live DB: Notifications CRUD, filtering, Anti-IDOR, idempotent mark-read & 
       tenantBNotifs.body.items[0].eventType,
       NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_REJECTED,
     );
+
+    // 7e. Tenant B đặt lịch mới -> Landlord hủy lịch -> Tenant B nhận VIEWING_APPOINTMENT_CANCELLED với actionUrl /viewing-appointments/:id
+    const futureSlot3 = new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString();
+    const createView3Res = await apiRequest('/api/v1/viewing-appointments', tokenB, {
+      method: 'POST',
+      body: JSON.stringify({
+        roomId,
+        proposedSlots: [futureSlot3],
+      }),
+    });
+    assert.equal(createView3Res.response.status, 201);
+    const appt3Id = createView3Res.body.appointmentId as string;
+    appointmentIds.push(appt3Id);
+
+    const landlordCancelRes = await apiRequest(
+      `/api/v1/viewing-appointments/${appt3Id}/cancel`,
+      tokenLandlord,
+      { method: 'PATCH', body: JSON.stringify({ reason: 'Chủ trọ có việc gấp' }) },
+    );
+    assert.equal(landlordCancelRes.response.status, 200);
+
+    const tenantBNotifsAfterLandlordCancel = await apiRequest('/api/v1/notifications', tokenB);
+    assert.equal(tenantBNotifsAfterLandlordCancel.response.status, 200);
+    const latestNotifB = tenantBNotifsAfterLandlordCancel.body.items[0];
+    assert.equal(latestNotifB.eventType, NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CANCELLED);
+    assert.equal(latestNotifB.actionUrl, `/viewing-appointments/${appt3Id}`);
+    assert.equal(latestNotifB.relatedEntityType, 'VIEWING_APPOINTMENT');
+    assert.equal(latestNotifB.relatedEntityId, appt3Id);
+    assert.ok(String(latestNotifB.content).includes('Chủ trọ'));
   } finally {
     if (appointmentIds.length > 0) {
       await prisma.viewingAppointment

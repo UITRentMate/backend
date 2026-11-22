@@ -154,9 +154,13 @@ describe('Notification Repository & Service', () => {
       unreadCount: 0,
     });
 
-    // Nhánh 1: isRead === false -> phải gọi updateMany
+    // Nhánh 1: isRead === false -> phải mở $transaction và gọi updateMany
     let updateCalled = 0;
-    stub(prisma, '$transaction', async (work: any) => work(prisma));
+    let txCalled = 0;
+    stub(prisma, '$transaction', async (work: any) => {
+      txCalled += 1;
+      return work(prisma);
+    });
     stub(prisma.notification, 'findFirst', async () => ({
       id: notifId,
       recipientId: userId,
@@ -173,11 +177,13 @@ describe('Notification Repository & Service', () => {
     stub(prisma.notification, 'count', async () => 0);
 
     const firstRead = await NotificationRepository.markOneAsRead(userId, notifId);
+    assert.equal(txCalled, 1);
     assert.equal(updateCalled, 1);
     assert.equal(firstRead?.notification.isRead, true);
 
-    // Nhánh 2: isRead === true -> idempotent, không gọi updateMany lại
+    // Nhánh 2: isRead === true -> read-only fast path, không mở $transaction và không gọi updateMany lại
     updateCalled = 0;
+    txCalled = 0;
     stub(prisma.notification, 'findFirst', async () => ({
       id: notifId,
       recipientId: userId,
@@ -189,7 +195,15 @@ describe('Notification Repository & Service', () => {
     }));
 
     const secondRead = await NotificationRepository.markOneAsRead(userId, notifId);
+    assert.equal(txCalled, 0);
     assert.equal(updateCalled, 0);
     assert.equal(secondRead?.notification.isRead, true);
+
+    // Nhánh 3: không tìm thấy -> trả null ngay, không mở $transaction
+    txCalled = 0;
+    stub(prisma.notification, 'findFirst', async () => null);
+    const missing = await NotificationRepository.findByIdAndMarkRead(userId, notifId);
+    assert.equal(missing, null);
+    assert.equal(txCalled, 0);
   });
 });

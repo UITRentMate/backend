@@ -43,37 +43,49 @@ function buildCategoryFilterCondition(
   };
 }
 
-async function markSingleNotificationAsReadInTx(
+async function findAndMarkSingleNotificationAsRead(
   recipientId: string,
   notificationId: string,
 ): Promise<{ notification: NotificationRecord; unreadCount: number } | null> {
+  const existing = await prisma.notification.findFirst({
+    where: {
+      id: notificationId,
+      recipientId,
+    },
+    select: NOTIFICATION_SELECT,
+  });
+
+  if (!existing) {
+    return null;
+  }
+
+  // Read-only fast path: trạng thái isRead chỉ chuyển một chiều false -> true,
+  // nên nếu đã đọc rồi thì không cần mở transaction ghi mà chỉ đếm unreadCount.
+  if (existing.isRead) {
+    const unreadCount = await prisma.notification.count({
+      where: {
+        recipientId,
+        isRead: false,
+      },
+    });
+
+    return {
+      notification: existing,
+      unreadCount,
+    };
+  }
+
   return prisma.$transaction(async (tx) => {
-    const existing = await tx.notification.findFirst({
+    await tx.notification.updateMany({
       where: {
         id: notificationId,
         recipientId,
+        isRead: false,
       },
-      select: NOTIFICATION_SELECT,
+      data: {
+        isRead: true,
+      },
     });
-
-    if (!existing) {
-      return null;
-    }
-
-    let finalRecord: NotificationRecord = existing;
-    if (!existing.isRead) {
-      await tx.notification.updateMany({
-        where: {
-          id: notificationId,
-          recipientId,
-          isRead: false,
-        },
-        data: {
-          isRead: true,
-        },
-      });
-      finalRecord = { ...existing, isRead: true };
-    }
 
     const unreadCount = await tx.notification.count({
       where: {
@@ -83,7 +95,7 @@ async function markSingleNotificationAsReadInTx(
     });
 
     return {
-      notification: finalRecord,
+      notification: { ...existing, isRead: true },
       unreadCount,
     };
   });
@@ -151,14 +163,14 @@ export class NotificationRepository {
     recipientId: string,
     notificationId: string,
   ): Promise<{ notification: NotificationRecord; unreadCount: number } | null> {
-    return markSingleNotificationAsReadInTx(recipientId, notificationId);
+    return findAndMarkSingleNotificationAsRead(recipientId, notificationId);
   }
 
   public static async markOneAsRead(
     recipientId: string,
     notificationId: string,
   ): Promise<{ notification: NotificationRecord; unreadCount: number } | null> {
-    return markSingleNotificationAsReadInTx(recipientId, notificationId);
+    return findAndMarkSingleNotificationAsRead(recipientId, notificationId);
   }
 
   public static async markAllAsRead(
