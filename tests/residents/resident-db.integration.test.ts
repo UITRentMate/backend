@@ -712,4 +712,75 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
     );
     assert.equal(cancelLiquidating.status, 200);
   });
+
+  test('6. Regression: Notification.title được giới hạn <= 160 ký tự khi fullName (150) và roomCode (50) đạt độ dài tối đa', async (t) => {
+    if (!dbReady) {
+      t.skip('PostgreSQL is not available');
+      return;
+    }
+
+    const landlord = await createTestUser('LANDLORD', 'Landlord Long');
+    const primary = await createTestUser('TENANT', 'Primary Long');
+    const longTenant = await prisma.user.create({
+      data: {
+        fullName: 'A'.repeat(150),
+        email: `res-long-${uniqueBase}-${Math.random().toString(36).slice(2, 7)}@rentmate.test`,
+        phone: nextPhone(),
+        passwordHash: 'test-only-hash',
+        role: 'TENANT',
+        accountStatus: 'ACTIVE',
+      },
+    });
+    createdUserIds.push(longTenant.id);
+
+    const { contract } = await createTestContract({
+      landlordId: landlord.id,
+      primaryTenantId: primary.id,
+      maxOccupants: 3,
+      roomCode: 'R'.repeat(50),
+    });
+
+    // 1. Invite -> Accept -> Self-leave
+    const invAccept = await apiCall('POST', `/api/v1/contracts/${contract.id}/invitations`, primary.id, {
+      identifier: longTenant.email,
+    });
+    assert.equal(invAccept.status, 201);
+
+    const accepted = await apiCall(
+      'PATCH',
+      `/api/v1/resident-invitations/${invAccept.body.invitationId}/accept`,
+      longTenant.id,
+    );
+    assert.equal(accepted.status, 200);
+
+    const selfLeft = await apiCall(
+      'DELETE',
+      `/api/v1/contracts/${contract.id}/residents/${longTenant.id}`,
+      longTenant.id,
+    );
+    assert.equal(selfLeft.status, 200);
+
+    // 2. Invite -> Reject
+    const invReject = await apiCall('POST', `/api/v1/contracts/${contract.id}/invitations`, primary.id, {
+      identifier: longTenant.email,
+    });
+    assert.equal(invReject.status, 201);
+
+    const rejected = await apiCall(
+      'PATCH',
+      `/api/v1/resident-invitations/${invReject.body.invitationId}/reject`,
+      longTenant.id,
+    );
+    assert.equal(rejected.status, 200);
+
+    const notifs = await prisma.notification.findMany({
+      where: {
+        recipientId: { in: [landlord.id, primary.id, longTenant.id] },
+      },
+    });
+    assert.ok(notifs.length >= 6);
+    for (const notif of notifs) {
+      assert.ok(notif.title.length <= 160, `Title vượt quá 160 ký tự: ${notif.title.length}`);
+    }
+  });
 });

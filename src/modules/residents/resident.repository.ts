@@ -48,6 +48,18 @@ async function lockContractRow(tx: Prisma.TransactionClient, contractId: string)
   return rows.length > 0;
 }
 
+/**
+ * Giới hạn tiêu đề Notification <= 160 ký tự (an toàn dưới VARCHAR(200) của PostgreSQL)
+ * trong khi nội dung đầy đủ được lưu trong payload.content (JsonB).
+ */
+function formatNotificationTitle(title: string, maxLength = 160): string {
+  const trimmed = title.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
 export class ResidentRepository {
   public static async findContractAccessContext(
     contractId: string,
@@ -407,7 +419,7 @@ export class ResidentRepository {
 
       await createNotification(tx, {
         recipientId: targetUser.id,
-        title: `Lời mời ở cùng phòng ${contract.room.roomCode}`,
+        title: formatNotificationTitle(`Lời mời ở cùng phòng ${contract.room.roomCode}`),
         eventType: NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_RECEIVED,
         payload: {
           content: `${invitation.invitedBy.fullName} đã mời bạn ở cùng phòng ${contract.room.roomCode}`,
@@ -718,7 +730,7 @@ export class ResidentRepository {
       const recipients = new Map<string, CreateNotificationInput>();
       recipients.set(invitation.contract.tenantId, {
         recipientId: invitation.contract.tenantId,
-        title: `${residentName} đã tham gia phòng ${roomCode}`,
+        title: formatNotificationTitle(`${residentName} đã tham gia phòng ${roomCode}`),
         eventType: NOTIFICATION_EVENT_TYPE.RESIDENT_JOINED,
         payload: {
           content: `${residentName} đã chấp nhận lời mời và tham gia phòng ${roomCode}`,
@@ -740,7 +752,7 @@ export class ResidentRepository {
       if (!recipients.has(invitation.contract.room.property.landlordId)) {
         recipients.set(invitation.contract.room.property.landlordId, {
           recipientId: invitation.contract.room.property.landlordId,
-          title: `${residentName} đã tham gia phòng ${roomCode}`,
+          title: formatNotificationTitle(`${residentName} đã tham gia phòng ${roomCode}`),
           eventType: NOTIFICATION_EVENT_TYPE.RESIDENT_JOINED,
           payload: {
             content: `${residentName} đã chấp nhận lời mời và tham gia phòng ${roomCode}`,
@@ -896,7 +908,7 @@ export class ResidentRepository {
 
       await createNotification(tx, {
         recipientId: invitation.invitedById,
-        title: `${inviteeName} đã từ chối lời mời phòng ${roomCode}`,
+        title: formatNotificationTitle(`${inviteeName} đã từ chối lời mời phòng ${roomCode}`),
         eventType: NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_REJECTED,
         payload: {
           content: `${inviteeName} đã từ chối lời mời ở cùng phòng ${roomCode}`,
@@ -1032,7 +1044,7 @@ export class ResidentRepository {
 
       await createNotification(tx, {
         recipientId: invitation.invitedUserId,
-        title: `Lời mời ở cùng phòng ${roomCode} đã bị thu hồi`,
+        title: formatNotificationTitle(`Lời mời ở cùng phòng ${roomCode} đã bị thu hồi`),
         eventType: NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_CANCELLED,
         payload: {
           content: `Lời mời ở cùng phòng ${roomCode} đã bị người gửi hoặc quản lý phòng thu hồi`,
@@ -1182,9 +1194,11 @@ export class ResidentRepository {
       const roomCode = contract.room.roomCode;
       const residentName = resident.user.fullName;
       const isSelfLeave = params.removalType === 'SELF_LEAVE';
-      const title = isSelfLeave
-        ? `${residentName} đã rời phòng ${roomCode}`
-        : `${residentName} đã được gỡ khỏi phòng ${roomCode}`;
+      const title = formatNotificationTitle(
+        isSelfLeave
+          ? `${residentName} đã rời phòng ${roomCode}`
+          : `${residentName} đã được gỡ khỏi phòng ${roomCode}`,
+      );
       const content = isSelfLeave
         ? `${residentName} đã chủ động rời khỏi danh sách cư trú phòng ${roomCode}`
         : `${residentName} đã được gỡ khỏi danh sách cư trú phòng ${roomCode}`;
