@@ -1,0 +1,1202 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Contract Residents & Invitations API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Quản lý Thành viên Cư trú & Lời mời ở cùng (BE-P3-08 / Issue #37)** thuộc nền tảng RentMate.
+    Bao gồm 7 endpoint P0 thực thi quy tắc nghiệp vụ `BR-10`, `BR-11` và Use Case `UC-15`.
+
+    ### 1. Quy ước Cư trú & Công thức Sức chứa (`BR-10`, `BR-11`)
+    - Bảng `contract_residents` chỉ lưu **Người ở cùng (`CO_RESIDENT`, `userId !== contract.tenantId`)**; Chủ hợp đồng (`PRIMARY_TENANT`) luôn được suy ra từ `contract.tenantId`.
+    - Công thức sức chứa:
+      `currentOccupants = 1 (PRIMARY_TENANT) + COUNT(contract_residents WHERE contract_id = X AND left_at IS NULL)`
+    - Ràng buộc bắt buộc: `currentOccupants <= Room.maxOccupants`.
+    - Mọi thao tác mời (`POST /invitations`), chấp nhận (`PATCH /accept`) và gỡ/tự rời (`DELETE /residents/{userId}`) chỉ hợp lệ khi `contract.status === 'ACTIVE'` (ngược lại trả `409 CONTRACT_NOT_ACTIVE`). Riêng `GET /contracts/{contractId}/residents` và các thao tác dọn lời mời `PENDING` còn hạn (`PATCH /reject`, `PATCH /cancel`) vẫn được phép thực hiện khi hợp đồng không còn `ACTIVE`.
+
+    ### 2. Vòng đời Lời mời (`ResidentInvitation` State Machine)
+    ```text
+    PENDING ──► ACCEPTED  (invitedUserId chấp nhận trong hạn 72h, dưới khóa Contract FOR UPDATE)
+       ├──────► REJECTED  (invitedUserId từ chối trong hạn 72h)
+       ├──────► CANCELLED (invitedById / Chủ HĐ / Chủ trọ thu hồi trong hạn 72h)
+       └──────► EXPIRED   (tự động chuyển khi expiresAt <= now)
+    ```
+    - Thời hạn lời mời cố định: **72 giờ** (`PHASE3_TIME_LIMITS_MS.RESIDENT_INVITATION_TTL_MS`).
+    - Các trạng thái `ACCEPTED`, `REJECTED`, `CANCELLED`, `EXPIRED` là bất biến (immutable).
+
+    ### 3. Chống Race Condition, Rejoin PK Upsert & Bảo mật Anti-IDOR
+    - Thao tác `/accept` (và các thao tác ghi liên quan đến hợp đồng) thực thi trong `prisma.$transaction` có khóa hàng trên `contracts` (`SELECT id FROM contracts WHERE id = $1::uuid FOR UPDATE`), đảm bảo không bao giờ vượt quá `Room.maxOccupants` khi nhiều người chấp nhận đồng thời.
+    - Người từng rời phòng (`leftAt != null`) có thể được mời lại và quay lại hợp đồng qua `upsert` trên khóa chính tổng hợp `(contractId, userId)` mà không lỗi trùng khóa chính.
+    - Mời bằng `identifier` (email hoặc SĐT Việt Nam `0xxxxxxxxx`) — **không chấp nhận `userId` UUID**.
+    - Bảo mật Anti-IDOR & Privacy-by-Default: người ngoài hợp đồng hoặc người ở cùng đã rời phòng (`leftAt != null`) nhận `404` (`CONTRACT_NOT_FOUND` hoặc `INVITATION_NOT_FOUND`). Response DTO chỉ trả `{ id, fullName, avatarUrl }` cho người dùng, ẩn hoàn toàn `email`, `phone`, `passwordHash` và `password_hash`.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+  - url: https://api.rentmate.vn
+    description: Máy chủ chính thức (Production)
+
+tags:
+  - name: Contract Residents
+    description: Quản lý danh sách thành viên cư trú và gửi lời mời ở cùng theo hợp đồng.
+  - name: Resident Invitations
+    description: Hộp thư lời mời ở cùng của người thuê và các hành động chấp nhận, từ chối, thu hồi lời mời.
+
+paths:
+  /api/v1/contracts/{contractId}/residents:
+    get:
+      tags:
+        - Contract Residents
+      summary: Xem danh sách thành viên cư trú và sức chứa của hợp đồng
+      description: |
+        Trả về danh sách cư trú hiện tại gồm Chủ hợp đồng (`PRIMARY_TENANT`) và toàn bộ Người ở cùng đang ở (`CO_RESIDENT`, `leftAt IS NULL`),
+        cùng thông tin sức chứa (`currentOccupants`, `maxOccupants`, `remainingSlots`).
+        - Nếu người gọi là **Chủ hợp đồng** hoặc **Chủ trọ sở hữu phòng**: tự động chuyển các lời mời `PENDING` quá hạn sang `EXPIRED` và trả kèm danh sách `pendingInvitations` còn hạn.
+        - Nếu người gọi là **Người ở cùng đang ở (`CO_RESIDENT`)**: chỉ trả danh sách cư dân, `pendingInvitations` trả về `null`.
+        - Nếu hợp đồng không tồn tại hoặc người gọi không thuộc 3 đối tượng trên (kể cả người ở cùng đã rời phòng): trả `404 CONTRACT_NOT_FOUND` (Anti-IDOR).
+      operationId: getContractResidents
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      responses:
+        '200':
+          description: Lấy danh sách cư trú thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContractResidentsResponse'
+              examples:
+                primaryTenantOrLandlordView:
+                  summary: Góc nhìn Chủ hợp đồng / Chủ trọ (kèm danh sách lời mời PENDING)
+                  value:
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    contractStatus: "ACTIVE"
+                    room:
+                      id: "22222222-3333-4444-8555-666666666666"
+                      roomCode: "P.201"
+                      maxOccupants: 3
+                      property:
+                        id: "33333333-4444-4555-8666-777777777777"
+                        name: "Nhà trọ Hoa Mai"
+                    currentOccupants: 2
+                    maxOccupants: 3
+                    remainingSlots: 1
+                    residents:
+                      - userId: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                        fullName: "Nguyễn Văn Chủ Hợp Đồng"
+                        avatarUrl: null
+                        residentRole: "PRIMARY_TENANT"
+                        joinedAt: "2026-11-01T08:00:00.000Z"
+                      - userId: "bbbb2222-cccc-4ddd-8eee-ffff22222222"
+                        fullName: "Trần Thị Ở Cùng"
+                        avatarUrl: "https://res.cloudinary.com/rentmate/image/upload/v1/avatar-b.jpg"
+                        residentRole: "CO_RESIDENT"
+                        joinedAt: "2026-11-10T09:30:00.000Z"
+                    pendingInvitations:
+                      - invitationId: "cccc3333-dddd-4eee-8fff-aaaa33333333"
+                        status: "PENDING"
+                        expiresAt: "2026-11-25T12:00:00.000Z"
+                        invitedUser:
+                          id: "dddd4444-eeee-4fff-8aaa-bbbb44444444"
+                          fullName: "Lê Văn Được Mời"
+                          avatarUrl: null
+                        invitedBy:
+                          id: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                          fullName: "Nguyễn Văn Chủ Hợp Đồng"
+                          avatarUrl: null
+                coResidentView:
+                  summary: Góc nhìn Người ở cùng (ẩn danh sách lời mời)
+                  value:
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    contractStatus: "ACTIVE"
+                    room:
+                      id: "22222222-3333-4444-8555-666666666666"
+                      roomCode: "P.201"
+                      maxOccupants: 3
+                      property:
+                        id: "33333333-4444-4555-8666-777777777777"
+                        name: "Nhà trọ Hoa Mai"
+                    currentOccupants: 2
+                    maxOccupants: 3
+                    remainingSlots: 1
+                    residents:
+                      - userId: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                        fullName: "Nguyễn Văn Chủ Hợp Đồng"
+                        avatarUrl: null
+                        residentRole: "PRIMARY_TENANT"
+                        joinedAt: "2026-11-01T08:00:00.000Z"
+                      - userId: "bbbb2222-cccc-4ddd-8eee-ffff22222222"
+                        fullName: "Trần Thị Ở Cùng"
+                        avatarUrl: "https://res.cloudinary.com/rentmate/image/upload/v1/avatar-b.jpg"
+                        residentRole: "CO_RESIDENT"
+                        joinedAt: "2026-11-10T09:30:00.000Z"
+                    pendingInvitations: null
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ContractNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/contracts/{contractId}/invitations:
+    post:
+      tags:
+        - Contract Residents
+      summary: Gửi lời mời ở cùng cho tài khoản RentMate
+      description: |
+        Chủ hợp đồng hoặc Chủ trọ sở hữu phòng gửi lời mời ở cùng tới một tài khoản `TENANT` đang `ACTIVE` thông qua `identifier` (email hoặc số điện thoại).
+        - Người ở cùng (`CO_RESIDENT`) gọi API này bị chặn `403 FORBIDDEN`.
+        - Người ngoài hợp đồng (hoặc người đã rời phòng) nhận `404 CONTRACT_NOT_FOUND` (Anti-IDOR).
+        - Nếu đã có lời mời `PENDING` cũ nhưng quá hạn (`expiresAt <= now`), hệ thống tự động chuyển lời mời cũ sang `EXPIRED` rồi tạo lời mời mới có hạn 72 giờ.
+        - Thực thi dưới khóa hàng `contracts FOR UPDATE` trong transaction, đồng thời gửi Notification `RESIDENT_INVITATION_RECEIVED` cho người được mời và ghi `AuditLog`.
+      operationId: createResidentInvitation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateResidentInvitationRequest'
+            examples:
+              inviteByEmail:
+                summary: Mời bằng email
+                value:
+                  identifier: "tenant.b@rentmate.vn"
+              inviteByPhone:
+                summary: Mời bằng số điện thoại
+                value:
+                  identifier: "0901234567"
+      responses:
+        '201':
+          description: Tạo lời mời ở cùng thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResidentInvitationCreatedResponse'
+              examples:
+                created:
+                  value:
+                    invitationId: "cccc3333-dddd-4eee-8fff-aaaa33333333"
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    status: "PENDING"
+                    expiresAt: "2026-11-25T12:00:00.000Z"
+                    invitedUser:
+                      id: "dddd4444-eeee-4fff-8aaa-bbbb44444444"
+                      fullName: "Lê Văn Được Mời"
+                      avatarUrl: null
+                    invitedBy:
+                      id: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                      fullName: "Nguyễn Văn Chủ Hợp Đồng"
+                      avatarUrl: null
+        '400':
+          description: Dữ liệu không hợp lệ hoặc tài khoản được mời không đủ điều kiện (`TENANT ACTIVE`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                validationError:
+                  summary: Định danh không phải email hoặc SĐT hợp lệ (hoặc truyền UUID)
+                  value:
+                    success: false
+                    code: "VALIDATION_ERROR"
+                    message: "Dữ liệu đầu vào không hợp lệ"
+                    errors:
+                      identifier:
+                        - "Định danh người được mời phải là email hoặc số điện thoại 10 chữ số bắt đầu bằng 0"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789abc"
+                inviteeNotEligible:
+                  summary: Tài khoản đích là LANDLORD/ADMIN hoặc đang bị khóa
+                  value:
+                    success: false
+                    code: "INVITEE_NOT_ELIGIBLE"
+                    message: "Tài khoản được mời phải là người thuê (TENANT) đang hoạt động"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789abd"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Hợp đồng không tồn tại / không có quyền truy cập, hoặc không tìm thấy tài khoản theo identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                contractNotFound:
+                  summary: Không tồn tại hợp đồng hoặc Anti-IDOR
+                  value:
+                    success: false
+                    code: "CONTRACT_NOT_FOUND"
+                    message: "Hợp đồng không tồn tại hoặc bạn không có quyền truy cập"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789abe"
+                inviteeNotFound:
+                  summary: Không tìm thấy tài khoản RentMate tương ứng
+                  value:
+                    success: false
+                    code: "INVITEE_NOT_FOUND"
+                    message: "Không tìm thấy tài khoản RentMate tương ứng với email hoặc số điện thoại này"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789abf"
+        '409':
+          description: Xung đột trạng thái hợp đồng, thành viên, lời mời trùng hoặc vượt sức chứa phòng
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                contractNotActive:
+                  value:
+                    success: false
+                    code: "CONTRACT_NOT_ACTIVE"
+                    message: "Chỉ có thể thực hiện thao tác khi hợp đồng đang ở trạng thái ACTIVE"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac0"
+                alreadyPrimaryTenant:
+                  value:
+                    success: false
+                    code: "ALREADY_PRIMARY_TENANT"
+                    message: "Không thể mời chính chủ hợp đồng của phòng này"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac1"
+                alreadyResident:
+                  value:
+                    success: false
+                    code: "ALREADY_RESIDENT"
+                    message: "Người dùng này hiện đang là thành viên cư trú của hợp đồng"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac2"
+                invitationAlreadyPending:
+                  value:
+                    success: false
+                    code: "INVITATION_ALREADY_PENDING"
+                    message: "Người dùng này đã có một lời mời ở cùng đang chờ phản hồi cho hợp đồng này"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac3"
+                roomCapacityExceeded:
+                  value:
+                    success: false
+                    code: "ROOM_CAPACITY_EXCEEDED"
+                    message: "Phòng đã đạt số lượng người ở tối đa theo quy định (BR-11)"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac4"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/resident-invitations:
+    get:
+      tags:
+        - Resident Invitations
+      summary: Xem hộp thư lời mời ở cùng của người thuê hiện tại
+      description: |
+        Người thuê (`TENANT` `ACTIVE`) xem danh sách các lời mời ở cùng gửi tới mình (`invitedUserId === currentUser.id`).
+        Trước khi truy vấn và đếm tổng số bản ghi, hệ thống tự động cập nhật các lời mời `PENDING` đã quá hạn (`expiresAt <= now`) sang `EXPIRED`.
+        Hỗ trợ lọc theo `status` và phân trang chuẩn `page` / `limit` (kèm alias `pageSize`). Sắp xếp theo `expiresAt DESC, id DESC`.
+      operationId: getMyResidentInvitations
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Lọc theo trạng thái lời mời
+          schema:
+            $ref: '#/components/schemas/ResidentInvitationStatus'
+        - name: page
+          in: query
+          required: false
+          description: Số thứ tự trang (mặc định 1)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          description: Số bản ghi mỗi trang (mặc định 20, tối đa 50). Nếu truyền cả `limit` và `pageSize`, ưu tiên `limit`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - name: pageSize
+          in: query
+          required: false
+          description: Alias tương thích ngược cho `limit`
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+      responses:
+        '200':
+          description: Lấy danh sách lời mời thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResidentInvitationsResponse'
+              examples:
+                sampleInbox:
+                  value:
+                    items:
+                      - invitationId: "cccc3333-dddd-4eee-8fff-aaaa33333333"
+                        contractId: "11111111-2222-4333-8444-555555555555"
+                        status: "PENDING"
+                        expiresAt: "2026-11-25T12:00:00.000Z"
+                        acceptedAt: null
+                        room:
+                          id: "22222222-3333-4444-8555-666666666666"
+                          roomCode: "P.201"
+                          maxOccupants: 3
+                          property:
+                            id: "33333333-4444-4555-8666-777777777777"
+                            name: "Nhà trọ Hoa Mai"
+                            address: "Số 123 Đường D1, Phường Linh Trung, TP. Thủ Đức"
+                        invitedBy:
+                          id: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                          fullName: "Nguyễn Văn Chủ Hợp Đồng"
+                          avatarUrl: null
+                    total: 1
+                    page: 1
+                    limit: 20
+                    totalPages: 1
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/resident-invitations/{invitationId}/accept:
+    patch:
+      tags:
+        - Resident Invitations
+      summary: Chấp nhận lời mời ở cùng (khóa hàng Contract chống vượt sức chứa)
+      description: |
+        Chỉ người được mời (`invitation.invitedUserId === currentUser.id`) mới có quyền chấp nhận; người khác nhận `404 INVITATION_NOT_FOUND` (Anti-IDOR).
+        Thực thi nguyên tử trong 1 `$transaction` với khóa hàng `SELECT id FROM contracts WHERE id = $1::uuid FOR UPDATE`:
+        1. Nếu lời mời đang `PENDING` nhưng `expiresAt <= now`: cập nhật `status = 'EXPIRED'`, commit trạng thái `EXPIRED` rồi trả `409 INVITATION_EXPIRED`.
+        2. Kiểm tra `contract.status === 'ACTIVE'` (`409 CONTRACT_NOT_ACTIVE`).
+        3. Đếm lại sức chứa dưới khóa (`1 + activeCoResidents >= room.maxOccupants` → `409 ROOM_CAPACITY_EXCEEDED`).
+        4. `upsert` bản ghi `ContractResident` (xử lý an toàn cả người mới lẫn người từng rời phòng quay lại).
+        5. Cập nhật `ResidentInvitation` sang `ACCEPTED` + `acceptedAt = now()`.
+        6. Gửi Notification `RESIDENT_JOINED` cho Chủ hợp đồng & Chủ trọ, và ghi `AuditLog`.
+      operationId: acceptResidentInvitation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvitationIdParam'
+      responses:
+        '200':
+          description: Chấp nhận lời mời và thêm vào danh sách cư trú thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcceptResidentInvitationResponse'
+              examples:
+                accepted:
+                  value:
+                    invitationId: "cccc3333-dddd-4eee-8fff-aaaa33333333"
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    status: "ACCEPTED"
+                    acceptedAt: "2026-11-22T12:15:00.000Z"
+                    resident:
+                      userId: "dddd4444-eeee-4fff-8aaa-bbbb44444444"
+                      fullName: "Lê Văn Được Mời"
+                      avatarUrl: null
+                      residentRole: "CO_RESIDENT"
+                      joinedAt: "2026-11-22T12:15:00.000Z"
+                    currentOccupants: 3
+                    maxOccupants: 3
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvitationNotFound'
+        '409':
+          description: Lời mời đã hết hạn, không ở trạng thái PENDING, hợp đồng không ACTIVE hoặc phòng đã đầy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                invitationExpired:
+                  value:
+                    success: false
+                    code: "INVITATION_EXPIRED"
+                    message: "Lời mời ở cùng đã hết hạn sau 72 giờ"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac5"
+                invitationNotPending:
+                  value:
+                    success: false
+                    code: "INVITATION_NOT_PENDING"
+                    message: "Lời mời không còn ở trạng thái chờ phản hồi (PENDING)"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac6"
+                contractNotActive:
+                  value:
+                    success: false
+                    code: "CONTRACT_NOT_ACTIVE"
+                    message: "Chỉ có thể chấp nhận lời mời khi hợp đồng đang ở trạng thái ACTIVE"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac7"
+                roomCapacityExceeded:
+                  value:
+                    success: false
+                    code: "ROOM_CAPACITY_EXCEEDED"
+                    message: "Phòng đã đạt số lượng người ở tối đa theo quy định (BR-11)"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac8"
+                alreadyResident:
+                  value:
+                    success: false
+                    code: "ALREADY_RESIDENT"
+                    message: "Bạn hiện đã là thành viên cư trú của hợp đồng này"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ac9"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/resident-invitations/{invitationId}/reject:
+    patch:
+      tags:
+        - Resident Invitations
+      summary: Từ chối lời mời ở cùng
+      description: |
+        Chỉ người được mời (`invitation.invitedUserId === currentUser.id`) được từ chối; người khác nhận `404 INVITATION_NOT_FOUND` (Anti-IDOR).
+        Chuyển lời mời từ `PENDING` sang `REJECTED` (vẫn cho phép dọn lời mời `PENDING` còn hạn ngay cả khi hợp đồng không còn `ACTIVE`; nếu đã quá hạn 72h thì commit trạng thái `EXPIRED` và trả `409 INVITATION_EXPIRED`).
+        Chỉ gửi Notification `RESIDENT_INVITATION_REJECTED` cho người gửi lời mời (`invitedById`) và ghi `AuditLog` trong cùng transaction.
+      operationId: rejectResidentInvitation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvitationIdParam'
+      responses:
+        '200':
+          description: Từ chối lời mời thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationStatusActionResponse'
+              examples:
+                rejected:
+                  value:
+                    invitationId: "cccc3333-dddd-4eee-8fff-aaaa33333333"
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    status: "REJECTED"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvitationNotFound'
+        '409':
+          $ref: '#/components/responses/InvitationStateConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/resident-invitations/{invitationId}/cancel:
+    patch:
+      tags:
+        - Resident Invitations
+      summary: Thu hồi lời mời ở cùng đang chờ phản hồi
+      description: |
+        Người gửi lời mời (`invitedById`), Chủ hợp đồng (`contract.tenantId`) hoặc Chủ trọ sở hữu phòng (`property.landlordId`) thu hồi lời mời đang `PENDING` → `CANCELLED` (vẫn cho phép dọn lời mời `PENDING` còn hạn ngay cả khi hợp đồng không còn `ACTIVE`).
+        Người không thuộc 3 đối tượng trên nhận `404 INVITATION_NOT_FOUND` (Anti-IDOR).
+        Nếu lời mời đã quá hạn 72h thì commit trạng thái `EXPIRED` và trả `409 INVITATION_EXPIRED`.
+        Gửi Notification `RESIDENT_INVITATION_CANCELLED` cho người được mời và ghi `AuditLog` trong cùng transaction.
+      operationId: cancelResidentInvitation
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/InvitationIdParam'
+      responses:
+        '200':
+          description: Thu hồi lời mời thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationStatusActionResponse'
+              examples:
+                cancelled:
+                  value:
+                    invitationId: "cccc3333-dddd-4eee-8fff-aaaa33333333"
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    status: "CANCELLED"
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/InvitationNotFound'
+        '409':
+          $ref: '#/components/responses/InvitationStateConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/contracts/{contractId}/residents/{userId}:
+    delete:
+      tags:
+        - Contract Residents
+      summary: Gỡ người ở cùng hoặc Người ở cùng tự rời phòng
+      description: |
+        Soft-remove một Người ở cùng đang cư trú (`leftAt = now()`).
+        - **Chủ hợp đồng** hoặc **Chủ trọ sở hữu phòng**: có thể gỡ bất kỳ `CO_RESIDENT` nào đang ở (`leftAt IS NULL`).
+        - **Người ở cùng đang ở (`CO_RESIDENT`)**: chỉ được gỡ **chính mình** (`userId === currentUser.id`, tự rời phòng); cố gỡ người khác trả `403 FORBIDDEN`.
+        - **Chặn tuyệt đối gỡ Chủ hợp đồng (`BR-10`)**: nếu `userId === contract.tenantId` trả `400 CANNOT_REMOVE_PRIMARY_TENANT`.
+        - **Người ngoài hợp đồng / người đã rời phòng**: trả `404 CONTRACT_NOT_FOUND` (Anti-IDOR).
+        - Chỉ hợp lệ khi `contract.status === 'ACTIVE'` (`409 CONTRACT_NOT_ACTIVE`).
+        - Gửi Notification `RESIDENT_REMOVED` tới **cả 3 actor** (Chủ trọ, Chủ hợp đồng và Người ở cùng đó) và ghi `AuditLog` trong cùng transaction.
+      operationId: removeContractResident
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ContractIdParam'
+        - $ref: '#/components/parameters/UserIdParam'
+      responses:
+        '200':
+          description: Đánh dấu người ở cùng rời phòng thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemoveContractResidentResponse'
+              examples:
+                removedByPrimaryTenant:
+                  summary: Chủ hợp đồng gỡ người ở cùng
+                  value:
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    userId: "bbbb2222-cccc-4ddd-8eee-ffff22222222"
+                    leftAt: "2026-11-22T12:30:00.000Z"
+                    removalType: "REMOVED_BY_PRIMARY_TENANT"
+                    currentOccupants: 1
+                    maxOccupants: 3
+                selfLeave:
+                  summary: Người ở cùng tự rời phòng
+                  value:
+                    contractId: "11111111-2222-4333-8444-555555555555"
+                    userId: "bbbb2222-cccc-4ddd-8eee-ffff22222222"
+                    leftAt: "2026-11-22T12:30:00.000Z"
+                    removalType: "SELF_LEAVE"
+                    currentOccupants: 1
+                    maxOccupants: 3
+        '400':
+          description: Tham số không hợp lệ hoặc cố gắng gỡ Chủ hợp đồng (`BR-10`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                cannotRemovePrimaryTenant:
+                  summary: Cấm gỡ Chủ hợp đồng
+                  value:
+                    success: false
+                    code: "CANNOT_REMOVE_PRIMARY_TENANT"
+                    message: "Không thể gỡ Chủ hợp đồng khỏi danh sách cư trú (BR-10)"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789aca"
+                validationError:
+                  summary: UUID không hợp lệ
+                  value:
+                    success: false
+                    code: "VALIDATION_ERROR"
+                    message: "Dữ liệu đầu vào không hợp lệ"
+                    errors:
+                      userId:
+                        - "Mã người dùng phải là UUID hợp lệ"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789acb"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Hợp đồng không tồn tại / Anti-IDOR, hoặc người dùng không phải người ở cùng đang cư trú
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                contractNotFound:
+                  value:
+                    success: false
+                    code: "CONTRACT_NOT_FOUND"
+                    message: "Hợp đồng không tồn tại hoặc bạn không có quyền truy cập"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789acc"
+                residentNotFound:
+                  value:
+                    success: false
+                    code: "RESIDENT_NOT_FOUND"
+                    message: "Người dùng không phải là người ở cùng đang cư trú của hợp đồng này"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789acd"
+        '409':
+          description: Hợp đồng không ở trạng thái ACTIVE
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                contractNotActive:
+                  value:
+                    success: false
+                    code: "CONTRACT_NOT_ACTIVE"
+                    message: "Chỉ có thể gỡ người ở cùng khi hợp đồng đang ở trạng thái ACTIVE"
+                    traceId: "9f3c7e20-6f29-4a12-9b11-123456789ace"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Access Token cấp từ API Login/Refresh gửi qua header `Authorization: Bearer <token>`.
+
+  parameters:
+    ContractIdParam:
+      name: contractId
+      in: path
+      required: true
+      description: Mã định danh UUID của hợp đồng thuê phòng
+      schema:
+        type: string
+        format: uuid
+
+    InvitationIdParam:
+      name: invitationId
+      in: path
+      required: true
+      description: Mã định danh UUID của lời mời ở cùng
+      schema:
+        type: string
+        format: uuid
+
+    UserIdParam:
+      name: userId
+      in: path
+      required: true
+      description: Mã định danh UUID của thành viên cư trú cần gỡ / tự rời phòng
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    ContractStatus:
+      type: string
+      enum:
+        - DRAFT
+        - PENDING_TENANT_CONFIRMATION
+        - AWAITING_DEPOSIT
+        - DEPOSIT_CONFIRMED
+        - ACTIVE
+        - LIQUIDATING
+        - TERMINATED
+        - CANCELLED
+        - EXPIRED
+
+    ResidentRole:
+      type: string
+      enum:
+        - PRIMARY_TENANT
+        - CO_RESIDENT
+
+    ResidentInvitationStatus:
+      type: string
+      enum:
+        - PENDING
+        - ACCEPTED
+        - REJECTED
+        - CANCELLED
+        - EXPIRED
+
+    ResidentRemovalType:
+      type: string
+      enum:
+        - SELF_LEAVE
+        - REMOVED_BY_PRIMARY_TENANT
+        - REMOVED_BY_LANDLORD
+
+    UserSummary:
+      type: object
+      required:
+        - id
+        - fullName
+        - avatarUrl
+      properties:
+        id:
+          type: string
+          format: uuid
+        fullName:
+          type: string
+        avatarUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+
+    ResidentItem:
+      type: object
+      required:
+        - userId
+        - fullName
+        - avatarUrl
+        - residentRole
+        - joinedAt
+      properties:
+        userId:
+          type: string
+          format: uuid
+        fullName:
+          type: string
+        avatarUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+        residentRole:
+          $ref: '#/components/schemas/ResidentRole'
+        joinedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Thời điểm bắt đầu cư trú (`activatedAt` của hợp đồng đối với `PRIMARY_TENANT`, hoặc `joinedAt` của `ContractResident` đối với `CO_RESIDENT`).
+
+    ContractRoomSummary:
+      type: object
+      required:
+        - id
+        - roomCode
+        - maxOccupants
+        - property
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomCode:
+          type: string
+        maxOccupants:
+          type: integer
+          minimum: 1
+        property:
+          type: object
+          required:
+            - id
+            - name
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+
+    InvitationRoomDetail:
+      type: object
+      required:
+        - id
+        - roomCode
+        - maxOccupants
+        - property
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomCode:
+          type: string
+        maxOccupants:
+          type: integer
+          minimum: 1
+        property:
+          type: object
+          required:
+            - id
+            - name
+            - address
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            address:
+              type: string
+
+    ContractPendingInvitationItem:
+      type: object
+      required:
+        - invitationId
+        - status
+        - expiresAt
+        - invitedUser
+        - invitedBy
+      properties:
+        invitationId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - PENDING
+        expiresAt:
+          type: string
+          format: date-time
+        invitedUser:
+          $ref: '#/components/schemas/UserSummary'
+        invitedBy:
+          $ref: '#/components/schemas/UserSummary'
+
+    ContractResidentsResponse:
+      type: object
+      required:
+        - contractId
+        - contractStatus
+        - room
+        - currentOccupants
+        - maxOccupants
+        - remainingSlots
+        - residents
+        - pendingInvitations
+      properties:
+        contractId:
+          type: string
+          format: uuid
+        contractStatus:
+          $ref: '#/components/schemas/ContractStatus'
+        room:
+          $ref: '#/components/schemas/ContractRoomSummary'
+        currentOccupants:
+          type: integer
+          minimum: 1
+        maxOccupants:
+          type: integer
+          minimum: 1
+        remainingSlots:
+          type: integer
+          minimum: 0
+        residents:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResidentItem'
+        pendingInvitations:
+          type:
+            - array
+            - "null"
+          description: Danh sách lời mời `PENDING` còn hạn (chỉ trả mảng cho Chủ hợp đồng & Chủ trọ; trả `null` cho `CO_RESIDENT`).
+          items:
+            $ref: '#/components/schemas/ContractPendingInvitationItem'
+
+    CreateResidentInvitationRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - identifier
+      properties:
+        identifier:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Email hoặc số điện thoại (10 chữ số bắt đầu bằng 0) của tài khoản RentMate cần mời. Tuyệt đối không nhận `userId` UUID.
+          example: "tenant.b@rentmate.vn"
+
+    ResidentInvitationCreatedResponse:
+      type: object
+      required:
+        - invitationId
+        - contractId
+        - status
+        - expiresAt
+        - invitedUser
+        - invitedBy
+      properties:
+        invitationId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - PENDING
+        expiresAt:
+          type: string
+          format: date-time
+        invitedUser:
+          $ref: '#/components/schemas/UserSummary'
+        invitedBy:
+          $ref: '#/components/schemas/UserSummary'
+
+    ReceivedResidentInvitationItem:
+      type: object
+      required:
+        - invitationId
+        - contractId
+        - status
+        - expiresAt
+        - acceptedAt
+        - room
+        - invitedBy
+      properties:
+        invitationId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/ResidentInvitationStatus'
+        expiresAt:
+          type: string
+          format: date-time
+        acceptedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        room:
+          $ref: '#/components/schemas/InvitationRoomDetail'
+        invitedBy:
+          $ref: '#/components/schemas/UserSummary'
+
+    PaginatedResidentInvitationsResponse:
+      type: object
+      required:
+        - items
+        - total
+        - page
+        - limit
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceivedResidentInvitationItem'
+        total:
+          type: integer
+          minimum: 0
+        page:
+          type: integer
+          minimum: 1
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 50
+        totalPages:
+          type: integer
+          minimum: 0
+
+    AcceptResidentInvitationResponse:
+      type: object
+      required:
+        - invitationId
+        - contractId
+        - status
+        - acceptedAt
+        - resident
+        - currentOccupants
+        - maxOccupants
+      properties:
+        invitationId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - ACCEPTED
+        acceptedAt:
+          type: string
+          format: date-time
+        resident:
+          $ref: '#/components/schemas/ResidentItem'
+        currentOccupants:
+          type: integer
+          minimum: 2
+        maxOccupants:
+          type: integer
+          minimum: 1
+
+    InvitationStatusActionResponse:
+      type: object
+      required:
+        - invitationId
+        - contractId
+        - status
+      properties:
+        invitationId:
+          type: string
+          format: uuid
+        contractId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - REJECTED
+            - CANCELLED
+
+    RemoveContractResidentResponse:
+      type: object
+      required:
+        - contractId
+        - userId
+        - leftAt
+        - removalType
+        - currentOccupants
+        - maxOccupants
+      properties:
+        contractId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        leftAt:
+          type: string
+          format: date-time
+        removalType:
+          $ref: '#/components/schemas/ResidentRemovalType'
+        currentOccupants:
+          type: integer
+          minimum: 1
+        maxOccupants:
+          type: integer
+          minimum: 1
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          const: false
+        code:
+          type: string
+        message:
+          type: string
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        traceId:
+          type: string
+          format: uuid
+
+  responses:
+    ValidationError:
+      description: Dữ liệu đầu vào không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            errors:
+              contractId:
+                - "Mã hợp đồng phải là UUID hợp lệ"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    Unauthorized:
+      description: Thiếu hoặc access token không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "550e8400-e29b-41d4-a716-446655440001"
+
+    Forbidden:
+      description: Không có quyền thực hiện thao tác hoặc tài khoản bị khóa
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            forbiddenRole:
+              value:
+                success: false
+                code: "FORBIDDEN"
+                message: "Bạn không có quyền thực hiện thao tác này"
+                traceId: "550e8400-e29b-41d4-a716-446655440002"
+            accountLocked:
+              value:
+                success: false
+                code: "ACCOUNT_LOCKED"
+                message: "Tài khoản đã bị khóa hoặc chưa kích hoạt"
+                traceId: "550e8400-e29b-41d4-a716-446655440003"
+
+    ContractNotFound:
+      description: Hợp đồng không tồn tại hoặc không thuộc quyền truy cập (Anti-IDOR)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "CONTRACT_NOT_FOUND"
+            message: "Hợp đồng không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "550e8400-e29b-41d4-a716-446655440004"
+
+    InvitationNotFound:
+      description: Lời mời không tồn tại hoặc không thuộc quyền truy cập (Anti-IDOR)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INVITATION_NOT_FOUND"
+            message: "Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "550e8400-e29b-41d4-a716-446655440005"
+
+    InvitationStateConflict:
+      description: Lời mời đã hết hạn 72 giờ hoặc không còn ở trạng thái PENDING
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            expired:
+              value:
+                success: false
+                code: "INVITATION_EXPIRED"
+                message: "Lời mời ở cùng đã hết hạn sau 72 giờ"
+                traceId: "550e8400-e29b-41d4-a716-446655440006"
+            notPending:
+              value:
+                success: false
+                code: "INVITATION_NOT_PENDING"
+                message: "Lời mời không còn ở trạng thái chờ phản hồi (PENDING)"
+                traceId: "550e8400-e29b-41d4-a716-446655440007"
+
+    InternalError:
+      description: Lỗi máy chủ nội bộ không xác định
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "550e8400-e29b-41d4-a716-446655440008"
