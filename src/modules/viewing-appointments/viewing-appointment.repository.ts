@@ -26,7 +26,7 @@ export interface CancelAppointmentNotificationMeta {
   recipientId: string;
   roomCode?: string | null;
   propertyName?: string | null;
-  canceledByRole?: 'TENANT' | 'LANDLORD';
+  canceledByRole: 'TENANT' | 'LANDLORD';
 }
 
 function formatRoomLabel(roomCode?: string | null, propertyName?: string | null): string {

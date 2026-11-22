@@ -51,7 +51,7 @@ test('cancelAppointment updates only the state observed by the service', async (
   stub(prisma.viewingAppointment, 'update', async () => ({ id: appointmentId }));
 
   await assert.rejects(
-    () => ViewingAppointmentRepository.cancelAppointment(appointmentId, 'Plans changed', 'CONFIRMED' as any, { recipientId: '550e8400-e29b-41d4-a716-446655440001' }),
+    () => ViewingAppointmentRepository.cancelAppointment(appointmentId, 'Plans changed', 'CONFIRMED' as any, { recipientId: '550e8400-e29b-41d4-a716-446655440001', canceledByRole: 'TENANT' }),
     (error: unknown) => error instanceof ApiError && error.statusCode === 409,
   );
   assert.deepEqual(updateArgs.where, { id: appointmentId, status: 'CONFIRMED' });
@@ -103,6 +103,7 @@ test('ViewingAppointmentRepository creates atomic notifications on create, confi
   await ViewingAppointmentRepository.cancelAppointment(appointmentId, 'Đổi kế hoạch', 'PENDING', {
     recipientId: '550e8400-e29b-41d4-a716-446655440001',
     roomCode: 'P.101',
+    canceledByRole: 'TENANT',
   });
 
   assert.equal(createdNotifications.length, 4);

@@ -1,9 +1,9 @@
 # Technical Design Specification: In-App Notifications Subsystem (BE-P3-07)
 
-**Issue:** #36 (`[BE-P3-07] Quản lý Thông báo In-App`)  
-**Tác giả:** Phan Gia Đạt (`@phangiadat`)  
-**Ngày:** 2026-11-22  
-**Nhánh:** `feat/be-p3-07-notifications-api`  
+**Issue:** #36 (`[BE-P3-07] Quản lý Thông báo In-App`)
+**Tác giả:** Phan Gia Đạt (`@phangiadat`)
+**Ngày:** 2026-11-22
+**Nhánh:** `feat/be-p3-07-notifications-api`
 **Trạng thái:** ĐÃ CHỐT THIẾT KẾ (Approved in Brainstorming)
 
 ---

@@ -70,6 +70,15 @@ describe('Notification Repository & Service', () => {
     // count thứ 2 là unreadCount toàn cục của user (chỉ lọc recipientId + isRead: false)
     assert.equal(countArgsList.length, 2);
     assert.deepEqual(countArgsList[1].where, { recipientId: userId, isRead: false });
+
+    // Lọc category=SYSTEM dùng notIn các nhóm còn lại để khớp fallback getNotificationCategory
+    await NotificationRepository.findNotificationsList(userId, {
+      page: 1,
+      limit: 20,
+      category: NOTIFICATION_CATEGORY.SYSTEM,
+    });
+    assert.ok(Array.isArray(findManyArgs.where.eventType?.notIn));
+    assert.ok(findManyArgs.where.eventType.notIn.includes(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED));
   });
 
   test('NotificationService tính totalPages chính xác và ném 404 khi thông báo không thuộc sở hữu', async () => {

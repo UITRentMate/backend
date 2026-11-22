@@ -46,8 +46,11 @@ describe('Notification Validation & Mapper', () => {
       },
     );
 
-    // Ưu tiên limit khi truyền cả limit và pageSize
-    assert.equal(validateNotificationListQuery({ limit: '10', pageSize: '30' }).limit, 10);
+    // Ưu tiên limit khi truyền cả limit và pageSize, bỏ qua chuỗi rỗng ''
+    assert.deepEqual(validateNotificationListQuery({ limit: '10', pageSize: '30', category: '', isRead: '', eventType: '' }), {
+      page: 1,
+      limit: 10,
+    });
 
     // Từ chối limit > 50, page <= 0, category sai, eventType sai định dạng
     assert.throws(

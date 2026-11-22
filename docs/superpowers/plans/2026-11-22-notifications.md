@@ -58,7 +58,7 @@ Thêm test vào `tests/phase3-shared-infra.test.ts`:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx tsx --test tests/phase3-shared-infra.test.ts`  
+Run: `npx tsx --test tests/phase3-shared-infra.test.ts`
 Expected: FAIL (`NOTIFICATION_CATEGORY` / `getNotificationCategory` is not exported).
 
 - [ ] **Step 3: Implement category constants, mappings, and typed `NotificationPayload`**
@@ -68,7 +68,7 @@ Expected: FAIL (`NOTIFICATION_CATEGORY` / `getNotificationCategory` is not expor
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx tsx --test tests/phase3-shared-infra.test.ts`  
+Run: `npx tsx --test tests/phase3-shared-infra.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -134,7 +134,7 @@ Tạo `tests/notifications/notification.validation-mapper.test.ts`:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx tsx --test tests/notifications/notification.validation-mapper.test.ts`  
+Run: `npx tsx --test tests/notifications/notification.validation-mapper.test.ts`
 Expected: FAIL (Cannot find module)
 
 - [ ] **Step 3: Implement `notification.types.ts`, `notification.validation.ts`, `notification.mapper.ts`**
@@ -143,7 +143,7 @@ Triển khai theo đúng signature đã định nghĩa ở Interfaces (dùng `zo
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx tsx --test tests/notifications/notification.validation-mapper.test.ts`  
+Run: `npx tsx --test tests/notifications/notification.validation-mapper.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -186,7 +186,7 @@ Tạo `tests/notifications/notification.repo-service.test.ts`:
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx tsx --test tests/notifications/notification.repo-service.test.ts`  
+Run: `npx tsx --test tests/notifications/notification.repo-service.test.ts`
 Expected: FAIL (Cannot find module)
 
 - [ ] **Step 3: Implement `notification.repository.ts` & `notification.service.ts`**
@@ -197,7 +197,7 @@ Lưu ý triển khai trong Repository:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx tsx --test tests/notifications/notification.repo-service.test.ts`  
+Run: `npx tsx --test tests/notifications/notification.repo-service.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -234,7 +234,7 @@ Test qua `http.createServer(app)` với stub `prisma.user.findUnique` và `Notif
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx tsx --test tests/notifications/notification-api.test.ts`  
+Run: `npx tsx --test tests/notifications/notification-api.test.ts`
 Expected: FAIL (404 route not mounted / module not found)
 
 - [ ] **Step 3: Implement `notification.controller.ts`, `notification.routes.ts`, and register in `src/app.ts`**
@@ -244,7 +244,7 @@ Expected: FAIL (404 route not mounted / module not found)
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx tsx --test tests/notifications/notification-api.test.ts`  
+Run: `npx tsx --test tests/notifications/notification-api.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**
@@ -280,7 +280,7 @@ Cập nhật `tests/viewing-appointment.repository.test.ts`, `tests/viewing-appo
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx tsx --test tests/viewing-appointment.repository.test.ts tests/viewing-appointment.service.test.ts`  
+Run: `npx tsx --test tests/viewing-appointment.repository.test.ts tests/viewing-appointment.service.test.ts`
 Expected: FAIL
 
 - [ ] **Step 3: Implement notification hooks inside transactions in `viewing-appointment.repository.ts` & `viewing-appointment.service.ts`**
@@ -291,7 +291,7 @@ Expected: FAIL
 
 - [ ] **Step 4: Run all Viewing Appointment tests to verify they pass**
 
-Run: `npx tsx --test tests/viewing-appointment*.test.ts`  
+Run: `npx tsx --test tests/viewing-appointment*.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: Commit**

@@ -19,9 +19,9 @@ info:
     - `SYSTEM`: Xác minh Chủ trọ, Tài khoản, và fallback cho các mã sự kiện mới chưa ánh xạ.
   contact:
     name: RentMate Engineering Team (SE100 - Nhóm 15)
-    license:
-      name: MIT
-      url: https://opensource.org/licenses/MIT
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
 servers:
   - url: http://localhost:5000
     description: Máy chủ phát triển cục bộ (Local Development)

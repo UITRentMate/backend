@@ -51,7 +51,10 @@ const notificationListQuerySchema = z.object({
   limit: positiveIntFromQuery('limit', 1, 50),
   pageSize: positiveIntFromQuery('pageSize', 1, 50),
   isRead: booleanFromQuery,
-  category: z.enum(categoryValues, { message: 'Danh mục thông báo không hợp lệ' }).optional(),
+  category: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.enum(categoryValues, { message: 'Danh mục thông báo không hợp lệ' }).optional(),
+  ),
   eventType: z.preprocess(
     (value) => (value === '' ? undefined : value),
     z
