@@ -55,6 +55,28 @@ describe('Phase 3 Shared Status Constants', () => {
       assert.ok(val.length <= 40, `NOTIFICATION_EVENT_TYPE "${val}" vượt quá VARCHAR(40)`);
     }
   });
+
+  test('NOTIFICATION_EVENT_TYPE có đủ 5 hằng số cho phân hệ cư trú (BE-P3-08) và đều <= 40 ký tự', () => {
+    const residentEvents = [
+      NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_RECEIVED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_JOINED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_REJECTED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_CANCELLED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_REMOVED,
+    ];
+
+    assert.deepEqual(residentEvents, [
+      'RESIDENT_INVITATION_RECEIVED',
+      'RESIDENT_JOINED',
+      'RESIDENT_INVITATION_REJECTED',
+      'RESIDENT_INVITATION_CANCELLED',
+      'RESIDENT_REMOVED',
+    ]);
+
+    for (const eventType of residentEvents) {
+      assert.ok(eventType.length <= 40, `${eventType} vượt quá VARCHAR(40)`);
+    }
+  });
 });
 
 describe('Nodemailer Email Service Config & Content', () => {
