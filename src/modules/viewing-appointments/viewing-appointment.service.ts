@@ -84,6 +84,11 @@ export class ViewingAppointmentService {
       tenantId,
       contactPhone,
       input,
+      {
+        landlordId: room.property.landlordId,
+        roomCode: room.roomCode,
+        propertyName: room.property.name,
+      },
     );
 
     return {
@@ -250,6 +255,11 @@ export class ViewingAppointmentService {
     const updated = await ViewingAppointmentRepository.rejectAppointment(
       appointmentId,
       input.reason,
+      {
+        tenantId: appointment.tenantId,
+        roomCode: appointment.room?.roomCode,
+        propertyName: appointment.room?.property?.name,
+      },
     );
 
     return {
@@ -324,10 +334,22 @@ export class ViewingAppointmentService {
       );
     }
 
+    const recipientId = isTenantOwner
+      ? appointment.room?.property?.landlordId
+      : appointment.tenantId;
+
     const updated = await ViewingAppointmentRepository.cancelAppointment(
       appointmentId,
       input.reason,
       appointment.status as typeof VIEWING_STATUS.PENDING | typeof VIEWING_STATUS.CONFIRMED,
+      recipientId
+        ? {
+            recipientId,
+            roomCode: appointment.room?.roomCode,
+            propertyName: appointment.room?.property?.name,
+            canceledByRole: isTenantOwner ? 'TENANT' : 'LANDLORD',
+          }
+        : undefined,
     );
 
     return {

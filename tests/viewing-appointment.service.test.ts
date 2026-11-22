@@ -48,3 +48,26 @@ test('cancelAppointment rejects a confirmed slot that has already started', asyn
     (error: unknown) => error instanceof ApiError && error.statusCode === 409 && error.code === 'CANCELLATION_CUTOFF_EXCEEDED',
   );
 });
+
+test('cancelAppointment passes the opposite party as notification recipient', async () => {
+  let capturedNotificationMeta: any;
+  stub(ViewingAppointmentRepository, 'findAppointmentById', async () => appointment);
+  stub(ViewingAppointmentRepository, 'cancelAppointment', async (_id: string, _reason: string, _expected: any, meta: any) => {
+    capturedNotificationMeta = meta;
+    return { id: appointmentId };
+  });
+
+  await ViewingAppointmentService.cancelAppointment(
+    { id: tenantId, role: 'TENANT' },
+    appointmentId,
+    { reason: 'Đổi lịch' },
+  );
+  assert.equal(capturedNotificationMeta.recipientId, landlordId);
+
+  await ViewingAppointmentService.cancelAppointment(
+    { id: landlordId, role: 'LANDLORD' },
+    appointmentId,
+    { reason: 'Bận việc' },
+  );
+  assert.equal(capturedNotificationMeta.recipientId, tenantId);
+});
