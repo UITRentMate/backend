@@ -65,8 +65,11 @@ function optionalIntQueryField(fieldLabel: string, min: number, max?: number) {
       if (trimmed === '') {
         return undefined;
       }
+      if (!/^\d+$/.test(trimmed)) {
+        return val;
+      }
       const num = Number(trimmed);
-      return Number.isFinite(num) ? num : val;
+      return Number.isSafeInteger(num) ? num : val;
     }
     return val;
   }, numSchema.optional());

@@ -15,6 +15,7 @@ import {
   mapReceivedInvitationItem,
   mapRemoveResidentResponse,
 } from '../../src/modules/residents/resident.mapper';
+import { formatNotificationTitle } from '../../src/modules/residents/resident.repository';
 
 const VALID_UUID_1 = '11111111-2222-4333-8444-555555555555';
 const VALID_UUID_2 = '22222222-3333-4444-8555-666666666666';
@@ -118,9 +119,17 @@ describe('Resident Validation', () => {
       { page: '0' },
       { page: '-1' },
       { page: 'abc' },
+      { page: '1e1' },
+      { page: '0x10' },
+      { page: '+1' },
+      { page: '1.5' },
       { limit: '0' },
       { limit: '51' },
+      { limit: '1e1' },
+      { limit: '0x10' },
       { pageSize: '51' },
+      { pageSize: '1e1' },
+      { pageSize: '0x10' },
     ]) {
       assert.throws(
         () => validateInvitationListQuery(badQuery),
@@ -298,5 +307,33 @@ describe('Resident DTO Mappers', () => {
     });
     assert.equal(removed.removalType, 'SELF_LEAVE');
     assert.equal(removed.leftAt, '2026-11-22T12:30:00.000Z');
+  });
+});
+
+describe('formatNotificationTitle', () => {
+  test('không cắt đôi emoji surrogate pair tại ranh giới 156-160 code points', () => {
+    const boundaryTitle = `${'A'.repeat(156)}🏠${'B'.repeat(20)}`;
+    const formatted = formatNotificationTitle(boundaryTitle);
+
+    assert.equal(formatted.isWellFormed(), true);
+    assert.equal([...formatted].length, 160);
+    assert.equal(formatted, `${'A'.repeat(156)}🏠...`);
+  });
+
+  test('giữ nguyên chuỗi có đúng 160 Unicode code points dù chứa nhiều emoji surrogate pair', () => {
+    const exact160Emojis = '🏠'.repeat(160);
+    const formatted = formatNotificationTitle(`  ${exact160Emojis}  `);
+
+    assert.equal(formatted.isWellFormed(), true);
+    assert.equal(formatted, exact160Emojis);
+  });
+
+  test('cắt gọn chuỗi vượt quá 160 Unicode code points toàn emoji mà không tạo lone surrogate', () => {
+    const over160Emojis = '🏠'.repeat(165);
+    const formatted = formatNotificationTitle(over160Emojis);
+
+    assert.equal(formatted.isWellFormed(), true);
+    assert.equal([...formatted].length, 160);
+    assert.equal(formatted, `${'🏠'.repeat(157)}...`);
   });
 });

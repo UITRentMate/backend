@@ -52,12 +52,115 @@ async function lockContractRow(tx: Prisma.TransactionClient, contractId: string)
  * Giới hạn tiêu đề Notification <= 160 ký tự (an toàn dưới VARCHAR(200) của PostgreSQL)
  * trong khi nội dung đầy đủ được lưu trong payload.content (JsonB).
  */
-function formatNotificationTitle(title: string, maxLength = 160): string {
+export function formatNotificationTitle(title: string, maxLength = 160): string {
   const trimmed = title.trim();
-  if (trimmed.length <= maxLength) {
+  const codePoints = [...trimmed];
+  if (codePoints.length <= maxLength) {
     return trimmed;
   }
-  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+  return `${codePoints.slice(0, maxLength - 3).join('').trimEnd()}...`;
+}
+
+const LOCKED_INVITATION_SELECT = {
+  id: true,
+  contractId: true,
+  invitedUserId: true,
+  invitedById: true,
+  status: true,
+  expiresAt: true,
+  invitedUser: {
+    select: USER_SUMMARY_SELECT,
+  },
+  contract: {
+    select: {
+      id: true,
+      status: true,
+      tenantId: true,
+      room: {
+        select: {
+          id: true,
+          roomCode: true,
+          maxOccupants: true,
+          property: {
+            select: {
+              id: true,
+              landlordId: true,
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+type LockedInvitationRow = Prisma.ResidentInvitationGetPayload<{
+  select: typeof LOCKED_INVITATION_SELECT;
+}>;
+
+type LoadedPendingInvitationResult =
+  | { outcome: 'EXPIRED' }
+  | { outcome: 'READY'; invitation: LockedInvitationRow };
+
+/**
+ * Khóa hàng Contract cha trước khi đọc lại lời mời để kiểm tra quyền, trạng thái PENDING
+ * và thực hiện lazy-expire an toàn (commit EXPIRED thay vì throw trong transaction).
+ */
+async function loadLockedPendingInvitation(
+  tx: Prisma.TransactionClient,
+  invitationId: string,
+  now: Date,
+  isAuthorized: (invitation: LockedInvitationRow) => boolean,
+): Promise<LoadedPendingInvitationResult> {
+  const invitationMeta = await tx.residentInvitation.findUnique({
+    where: { id: invitationId },
+    select: { contractId: true },
+  });
+
+  if (!invitationMeta) {
+    throw new ApiError(
+      404,
+      'INVITATION_NOT_FOUND',
+      'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
+    );
+  }
+
+  await lockContractRow(tx, invitationMeta.contractId);
+
+  const invitation = await tx.residentInvitation.findUnique({
+    where: { id: invitationId },
+    select: LOCKED_INVITATION_SELECT,
+  });
+
+  if (!invitation || !isAuthorized(invitation)) {
+    throw new ApiError(
+      404,
+      'INVITATION_NOT_FOUND',
+      'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
+    );
+  }
+
+  if (invitation.status === RESIDENT_INVITATION_STATUS.EXPIRED) {
+    throw new ApiError(409, 'INVITATION_EXPIRED', 'Lời mời ở cùng đã hết hạn sau 72 giờ');
+  }
+
+  if (invitation.status !== RESIDENT_INVITATION_STATUS.PENDING) {
+    throw new ApiError(
+      409,
+      'INVITATION_NOT_PENDING',
+      'Lời mời không còn ở trạng thái chờ phản hồi (PENDING)',
+    );
+  }
+
+  // Commit EXPIRED status cleanly before throwing 409 in the service layer.
+  if (invitation.expiresAt <= now) {
+    await tx.residentInvitation.update({
+      where: { id: invitation.id },
+      data: { status: RESIDENT_INVITATION_STATUS.EXPIRED },
+    });
+    return { outcome: 'EXPIRED' };
+  }
+
+  return { outcome: 'READY', invitation };
 }
 
 export class ResidentRepository {
@@ -565,84 +668,16 @@ export class ResidentRepository {
     const now = params.now ?? new Date();
 
     return prisma.$transaction(async (tx) => {
-      const invitationMeta = await tx.residentInvitation.findUnique({
-        where: { id: params.invitationId },
-        select: { contractId: true },
-      });
-
-      if (!invitationMeta) {
-        throw new ApiError(
-          404,
-          'INVITATION_NOT_FOUND',
-          'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
-        );
-      }
-
-      await lockContractRow(tx, invitationMeta.contractId);
-
-      const invitation = await tx.residentInvitation.findUnique({
-        where: { id: params.invitationId },
-        select: {
-          id: true,
-          contractId: true,
-          invitedUserId: true,
-          invitedById: true,
-          status: true,
-          expiresAt: true,
-          invitedUser: {
-            select: USER_SUMMARY_SELECT,
-          },
-          contract: {
-            select: {
-              id: true,
-              status: true,
-              tenantId: true,
-              room: {
-                select: {
-                  id: true,
-                  roomCode: true,
-                  maxOccupants: true,
-                  property: {
-                    select: {
-                      id: true,
-                      landlordId: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      if (!invitation || invitation.invitedUserId !== params.actorId) {
-        throw new ApiError(
-          404,
-          'INVITATION_NOT_FOUND',
-          'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
-        );
-      }
-
-      if (invitation.status === RESIDENT_INVITATION_STATUS.EXPIRED) {
-        throw new ApiError(409, 'INVITATION_EXPIRED', 'Lời mời ở cùng đã hết hạn sau 72 giờ');
-      }
-
-      if (invitation.status !== RESIDENT_INVITATION_STATUS.PENDING) {
-        throw new ApiError(
-          409,
-          'INVITATION_NOT_PENDING',
-          'Lời mời không còn ở trạng thái chờ phản hồi (PENDING)',
-        );
-      }
-
-      // Commit EXPIRED status cleanly before throwing 409 in the service layer.
-      if (invitation.expiresAt <= now) {
-        await tx.residentInvitation.update({
-          where: { id: invitation.id },
-          data: { status: RESIDENT_INVITATION_STATUS.EXPIRED },
-        });
+      const loaded = await loadLockedPendingInvitation(
+        tx,
+        params.invitationId,
+        now,
+        (row) => row.invitedUserId === params.actorId,
+      );
+      if (loaded.outcome === 'EXPIRED') {
         return { outcome: 'EXPIRED' };
       }
+      const { invitation } = loaded;
 
       if (invitation.contract.status !== CONTRACT_STATUS.ACTIVE) {
         throw new ApiError(
@@ -822,79 +857,16 @@ export class ResidentRepository {
     const now = params.now ?? new Date();
 
     return prisma.$transaction(async (tx) => {
-      const invitationMeta = await tx.residentInvitation.findUnique({
-        where: { id: params.invitationId },
-        select: { contractId: true },
-      });
-
-      if (!invitationMeta) {
-        throw new ApiError(
-          404,
-          'INVITATION_NOT_FOUND',
-          'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
-        );
-      }
-
-      await lockContractRow(tx, invitationMeta.contractId);
-
-      const invitation = await tx.residentInvitation.findUnique({
-        where: { id: params.invitationId },
-        select: {
-          id: true,
-          contractId: true,
-          invitedUserId: true,
-          invitedById: true,
-          status: true,
-          expiresAt: true,
-          invitedUser: {
-            select: USER_SUMMARY_SELECT,
-          },
-          contract: {
-            select: {
-              tenantId: true,
-              room: {
-                select: {
-                  id: true,
-                  roomCode: true,
-                  property: {
-                    select: {
-                      landlordId: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      if (!invitation || invitation.invitedUserId !== params.actorId) {
-        throw new ApiError(
-          404,
-          'INVITATION_NOT_FOUND',
-          'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
-        );
-      }
-
-      if (invitation.status === RESIDENT_INVITATION_STATUS.EXPIRED) {
-        throw new ApiError(409, 'INVITATION_EXPIRED', 'Lời mời ở cùng đã hết hạn sau 72 giờ');
-      }
-
-      if (invitation.status !== RESIDENT_INVITATION_STATUS.PENDING) {
-        throw new ApiError(
-          409,
-          'INVITATION_NOT_PENDING',
-          'Lời mời không còn ở trạng thái chờ phản hồi (PENDING)',
-        );
-      }
-
-      if (invitation.expiresAt <= now) {
-        await tx.residentInvitation.update({
-          where: { id: invitation.id },
-          data: { status: RESIDENT_INVITATION_STATUS.EXPIRED },
-        });
+      const loaded = await loadLockedPendingInvitation(
+        tx,
+        params.invitationId,
+        now,
+        (row) => row.invitedUserId === params.actorId,
+      );
+      if (loaded.outcome === 'EXPIRED') {
         return { outcome: 'EXPIRED' };
       }
+      const { invitation } = loaded;
 
       await tx.residentInvitation.update({
         where: { id: invitation.id },
@@ -958,82 +930,19 @@ export class ResidentRepository {
     const now = params.now ?? new Date();
 
     return prisma.$transaction(async (tx) => {
-      const invitationMeta = await tx.residentInvitation.findUnique({
-        where: { id: params.invitationId },
-        select: { contractId: true },
-      });
-
-      if (!invitationMeta) {
-        throw new ApiError(
-          404,
-          'INVITATION_NOT_FOUND',
-          'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
-        );
-      }
-
-      await lockContractRow(tx, invitationMeta.contractId);
-
-      const invitation = await tx.residentInvitation.findUnique({
-        where: { id: params.invitationId },
-        select: {
-          id: true,
-          contractId: true,
-          invitedUserId: true,
-          invitedById: true,
-          status: true,
-          expiresAt: true,
-          contract: {
-            select: {
-              tenantId: true,
-              room: {
-                select: {
-                  id: true,
-                  roomCode: true,
-                  property: {
-                    select: {
-                      landlordId: true,
-                    },
-                  },
-                },
-              },
-            },
-          },
-        },
-      });
-
-      const canCancel =
-        invitation &&
-        (params.actorId === invitation.invitedById ||
-          params.actorId === invitation.contract.tenantId ||
-          params.actorId === invitation.contract.room.property.landlordId);
-
-      if (!invitation || !canCancel) {
-        throw new ApiError(
-          404,
-          'INVITATION_NOT_FOUND',
-          'Lời mời ở cùng không tồn tại hoặc bạn không có quyền truy cập',
-        );
-      }
-
-      if (invitation.status === RESIDENT_INVITATION_STATUS.EXPIRED) {
-        throw new ApiError(409, 'INVITATION_EXPIRED', 'Lời mời ở cùng đã hết hạn sau 72 giờ');
-      }
-
-      if (invitation.status !== RESIDENT_INVITATION_STATUS.PENDING) {
-        throw new ApiError(
-          409,
-          'INVITATION_NOT_PENDING',
-          'Lời mời không còn ở trạng thái chờ phản hồi (PENDING)',
-        );
-      }
-
-      if (invitation.expiresAt <= now) {
-        await tx.residentInvitation.update({
-          where: { id: invitation.id },
-          data: { status: RESIDENT_INVITATION_STATUS.EXPIRED },
-        });
+      const loaded = await loadLockedPendingInvitation(
+        tx,
+        params.invitationId,
+        now,
+        (row) =>
+          params.actorId === row.invitedById ||
+          params.actorId === row.contract.tenantId ||
+          params.actorId === row.contract.room.property.landlordId,
+      );
+      if (loaded.outcome === 'EXPIRED') {
         return { outcome: 'EXPIRED' };
       }
+      const { invitation } = loaded;
 
       await tx.residentInvitation.update({
         where: { id: invitation.id },

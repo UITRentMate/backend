@@ -46,7 +46,11 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
     return `09${String(uniqueBase).padStart(7, '0').slice(-6)}${String(phoneSeq).padStart(2, '0')}`;
   }
 
-  async function createTestUser(role: 'TENANT' | 'LANDLORD', label: string) {
+  async function createTestUser(
+    role: 'TENANT' | 'LANDLORD',
+    label: string,
+    accountStatus: 'ACTIVE' | 'LOCKED' = 'ACTIVE',
+  ) {
     const idx = createdUserIds.length + 1;
     const user = await prisma.user.create({
       data: {
@@ -55,7 +59,7 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
         phone: nextPhone(),
         passwordHash: 'test-only-hash',
         role,
-        accountStatus: 'ACTIVE',
+        accountStatus,
       },
     });
     createdUserIds.push(user.id);
@@ -596,6 +600,20 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
       { identifier: outsider.email },
     );
     assert.equal(invReject.status, 201);
+
+    const createdAudit = await prisma.auditLog.findFirst({
+      where: {
+        entityType: 'RESIDENT_INVITATION',
+        entityId: invReject.body.invitationId,
+        action: 'RESIDENT_INVITATION_CREATED',
+      },
+    });
+    assert.ok(createdAudit);
+    assert.equal(createdAudit.actorId, landlord.id);
+    assert.equal(createdAudit.oldData, null);
+    assert.equal((createdAudit.newData as Record<string, unknown>)?.status, 'PENDING');
+    assert.equal((createdAudit.newData as Record<string, unknown>)?.invitedUserId, outsider.id);
+
     const rejected = await apiCall(
       'PATCH',
       `/api/v1/resident-invitations/${invReject.body.invitationId}/reject`,
@@ -618,6 +636,18 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
       invReject.body.invitationId,
       `/landlord/contracts/${contract.id}/residents`,
     );
+
+    const rejectAudit = await prisma.auditLog.findFirst({
+      where: {
+        entityType: 'RESIDENT_INVITATION',
+        entityId: invReject.body.invitationId,
+        action: 'RESIDENT_INVITATION_REJECTED',
+      },
+    });
+    assert.ok(rejectAudit);
+    assert.equal(rejectAudit.actorId, outsider.id);
+    assert.equal((rejectAudit.oldData as Record<string, unknown>)?.status, 'PENDING');
+    assert.equal((rejectAudit.newData as Record<string, unknown>)?.status, 'REJECTED');
 
     const invCancel = await apiCall(
       'POST',
@@ -647,6 +677,19 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
       invCancel.body.invitationId,
       '/resident-invitations',
     );
+
+    const cancelAudit = await prisma.auditLog.findFirst({
+      where: {
+        entityType: 'RESIDENT_INVITATION',
+        entityId: invCancel.body.invitationId,
+        action: 'RESIDENT_INVITATION_CANCELLED',
+      },
+    });
+    assert.ok(cancelAudit);
+    assert.equal(cancelAudit.actorId, primary.id);
+    assert.equal((cancelAudit.oldData as Record<string, unknown>)?.status, 'PENDING');
+    assert.equal((cancelAudit.newData as Record<string, unknown>)?.status, 'CANCELLED');
+    assert.equal((cancelAudit.newData as Record<string, unknown>)?.cancelledById, primary.id);
 
     // Non-ACTIVE contract (LIQUIDATING): allow GET, PATCH /reject, PATCH /cancel; block POST, /accept, DELETE with 409
     const invForLiquidatingAccept = await apiCall(
@@ -782,5 +825,280 @@ describe('Resident PostgreSQL Live DB Integration Tests', () => {
     for (const notif of notifs) {
       assert.ok(notif.title.length <= 160, `Title vượt quá 160 ký tự: ${notif.title.length}`);
     }
+  });
+
+  test('7. REMOVED_BY_LANDLORD trên PostgreSQL thật: cập nhật leftAt, gửi 3 Notification RESIDENT_REMOVED và ghi AuditLog RESIDENT_REMOVED', async (t) => {
+    if (!dbReady) {
+      t.skip('PostgreSQL is not available');
+      return;
+    }
+
+    const landlord = await createTestUser('LANDLORD', 'Landlord C7');
+    const primary = await createTestUser('TENANT', 'Primary C7');
+    const coRes = await createTestUser('TENANT', 'CoRes C7');
+    const { contract } = await createTestContract({
+      landlordId: landlord.id,
+      primaryTenantId: primary.id,
+      maxOccupants: 3,
+      roomCode: 'P.207',
+    });
+
+    const inv = await apiCall('POST', `/api/v1/contracts/${contract.id}/invitations`, primary.id, {
+      identifier: coRes.email,
+    });
+    assert.equal(inv.status, 201);
+    const acc = await apiCall(
+      'PATCH',
+      `/api/v1/resident-invitations/${inv.body.invitationId}/accept`,
+      coRes.id,
+    );
+    assert.equal(acc.status, 200);
+
+    const removed = await apiCall(
+      'DELETE',
+      `/api/v1/contracts/${contract.id}/residents/${coRes.id}`,
+      landlord.id,
+    );
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.contractId, contract.id);
+    assert.equal(removed.body.userId, coRes.id);
+    assert.equal(removed.body.removalType, 'REMOVED_BY_LANDLORD');
+    assert.equal(removed.body.currentOccupants, 1);
+    assert.equal(removed.body.maxOccupants, 3);
+    assert.equal(typeof removed.body.leftAt, 'string');
+
+    const residentRow = await prisma.contractResident.findUnique({
+      where: { contractId_userId: { contractId: contract.id, userId: coRes.id } },
+    });
+    assert.ok(residentRow?.leftAt !== null);
+
+    const removedNotifs = await prisma.notification.findMany({
+      where: {
+        recipientId: { in: [landlord.id, primary.id, coRes.id] },
+        eventType: NOTIFICATION_EVENT_TYPE.RESIDENT_REMOVED,
+      },
+    });
+    assert.equal(removedNotifs.length, 3);
+    for (const notif of removedNotifs) {
+      const expectedUrl =
+        notif.recipientId === landlord.id
+          ? `/landlord/contracts/${contract.id}/residents`
+          : notif.recipientId === primary.id
+            ? `/contracts/${contract.id}/residents`
+            : '/contracts';
+      assertStandardNotificationPayload(notif.payload, 'CONTRACT', contract.id, expectedUrl);
+      const metadata = (notif.payload as Record<string, any>).metadata as Record<string, unknown>;
+      assert.equal(metadata.removalType, 'REMOVED_BY_LANDLORD');
+    }
+
+    const removedAudit = await prisma.auditLog.findFirst({
+      where: {
+        entityType: 'CONTRACT_RESIDENT',
+        entityId: contract.id,
+        action: 'RESIDENT_REMOVED',
+      },
+    });
+    assert.ok(removedAudit);
+    assert.equal(removedAudit.actorId, landlord.id);
+    assert.equal((removedAudit.oldData as Record<string, unknown>)?.leftAt, null);
+    assert.equal((removedAudit.oldData as Record<string, unknown>)?.userId, coRes.id);
+    assert.equal(
+      (removedAudit.newData as Record<string, unknown>)?.removalType,
+      'REMOVED_BY_LANDLORD',
+    );
+    assert.equal((removedAudit.newData as Record<string, unknown>)?.currentOccupants, 1);
+  });
+
+  test('8. Bao phủ 7 nhánh lỗi Repository trên PostgreSQL thật (404/400/409)', async (t) => {
+    if (!dbReady) {
+      t.skip('PostgreSQL is not available');
+      return;
+    }
+
+    const landlord = await createTestUser('LANDLORD', 'Landlord C8');
+    const primary = await createTestUser('TENANT', 'Primary C8');
+    const coRes = await createTestUser('TENANT', 'CoRes C8');
+    const lockedTenant = await createTestUser('TENANT', 'Locked C8', 'LOCKED');
+    const extraTenant1 = await createTestUser('TENANT', 'Extra1 C8');
+    const extraTenant2 = await createTestUser('TENANT', 'Extra2 C8');
+
+    const { contract: fullContract } = await createTestContract({
+      landlordId: landlord.id,
+      primaryTenantId: primary.id,
+      maxOccupants: 2,
+      roomCode: 'P.208A',
+    });
+
+    // 1. 404 INVITEE_NOT_FOUND (email & phone không tồn tại)
+    const missingEmailRes = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: `nonexistent-${uniqueBase}@rentmate.test` },
+    );
+    assert.equal(missingEmailRes.status, 404);
+    assert.equal(missingEmailRes.body.code, 'INVITEE_NOT_FOUND');
+
+    const missingPhoneRes = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: nextPhone() },
+    );
+    assert.equal(missingPhoneRes.status, 404);
+    assert.equal(missingPhoneRes.body.code, 'INVITEE_NOT_FOUND');
+
+    // 2. 400 INVITEE_NOT_ELIGIBLE (LANDLORD hoặc TENANT LOCKED)
+    const inviteLandlordRes = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: landlord.email },
+    );
+    assert.equal(inviteLandlordRes.status, 400);
+    assert.equal(inviteLandlordRes.body.code, 'INVITEE_NOT_ELIGIBLE');
+
+    const inviteLockedRes = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: lockedTenant.phone },
+    );
+    assert.equal(inviteLockedRes.status, 400);
+    assert.equal(inviteLockedRes.body.code, 'INVITEE_NOT_ELIGIBLE');
+
+    // 3. 409 ALREADY_PRIMARY_TENANT
+    const invitePrimaryRes = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      landlord.id,
+      { identifier: primary.email },
+    );
+    assert.equal(invitePrimaryRes.status, 409);
+    assert.equal(invitePrimaryRes.body.code, 'ALREADY_PRIMARY_TENANT');
+
+    // Đưa coRes vào ở cùng để test ALREADY_RESIDENT và ROOM_CAPACITY_EXCEEDED
+    const invAccepted = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: coRes.email },
+    );
+    assert.equal(invAccepted.status, 201);
+    const accOk = await apiCall(
+      'PATCH',
+      `/api/v1/resident-invitations/${invAccepted.body.invitationId}/accept`,
+      coRes.id,
+    );
+    assert.equal(accOk.status, 200);
+
+    // 4. 409 ALREADY_RESIDENT
+    const inviteActiveCoRes = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: coRes.email },
+    );
+    assert.equal(inviteActiveCoRes.status, 409);
+    assert.equal(inviteActiveCoRes.body.code, 'ALREADY_RESIDENT');
+
+    // 5. 409 ROOM_CAPACITY_EXCEEDED ngay lúc POST /invitations
+    const inviteWhenFull = await apiCall(
+      'POST',
+      `/api/v1/contracts/${fullContract.id}/invitations`,
+      primary.id,
+      { identifier: extraTenant1.email },
+    );
+    assert.equal(inviteWhenFull.status, 409);
+    assert.equal(inviteWhenFull.body.code, 'ROOM_CAPACITY_EXCEEDED');
+
+    // 6. 409 INVITATION_NOT_PENDING trên /accept, /reject, /cancel (với ACCEPTED, REJECTED, CANCELLED)
+    const { contract: openContract } = await createTestContract({
+      landlordId: landlord.id,
+      primaryTenantId: primary.id,
+      maxOccupants: 4,
+      roomCode: 'P.208B',
+    });
+
+    const invForReject = await apiCall(
+      'POST',
+      `/api/v1/contracts/${openContract.id}/invitations`,
+      primary.id,
+      { identifier: extraTenant1.email },
+    );
+    assert.equal(invForReject.status, 201);
+    assert.equal(
+      (
+        await apiCall(
+          'PATCH',
+          `/api/v1/resident-invitations/${invForReject.body.invitationId}/reject`,
+          extraTenant1.id,
+        )
+      ).status,
+      200,
+    );
+
+    const invForCancel = await apiCall(
+      'POST',
+      `/api/v1/contracts/${openContract.id}/invitations`,
+      primary.id,
+      { identifier: extraTenant2.email },
+    );
+    assert.equal(invForCancel.status, 201);
+    assert.equal(
+      (
+        await apiCall(
+          'PATCH',
+          `/api/v1/resident-invitations/${invForCancel.body.invitationId}/cancel`,
+          primary.id,
+        )
+      ).status,
+      200,
+    );
+
+    const notPendingChecks: Array<[string, string, string]> = [
+      ['accept', invAccepted.body.invitationId, coRes.id],
+      ['reject', invAccepted.body.invitationId, coRes.id],
+      ['cancel', invAccepted.body.invitationId, primary.id],
+      ['accept', invForReject.body.invitationId, extraTenant1.id],
+      ['reject', invForReject.body.invitationId, extraTenant1.id],
+      ['cancel', invForReject.body.invitationId, primary.id],
+      ['accept', invForCancel.body.invitationId, extraTenant2.id],
+      ['reject', invForCancel.body.invitationId, extraTenant2.id],
+      ['cancel', invForCancel.body.invitationId, primary.id],
+    ];
+    for (const [action, invitationId, actorId] of notPendingChecks) {
+      const res = await apiCall(
+        'PATCH',
+        `/api/v1/resident-invitations/${invitationId}/${action}`,
+        actorId,
+      );
+      assert.equal(res.status, 409, `${action} on ${invitationId} expected 409, got ${res.status}`);
+      assert.equal(res.body.code, 'INVITATION_NOT_PENDING');
+    }
+
+    // 7. 404 RESIDENT_NOT_FOUND ở DELETE /residents/:userId (user chưa từng ở & user đã rời phòng)
+    const removeNonResident = await apiCall(
+      'DELETE',
+      `/api/v1/contracts/${fullContract.id}/residents/${extraTenant1.id}`,
+      primary.id,
+    );
+    assert.equal(removeNonResident.status, 404);
+    assert.equal(removeNonResident.body.code, 'RESIDENT_NOT_FOUND');
+
+    const removeCoResFirst = await apiCall(
+      'DELETE',
+      `/api/v1/contracts/${fullContract.id}/residents/${coRes.id}`,
+      primary.id,
+    );
+    assert.equal(removeCoResFirst.status, 200);
+
+    const removeCoResAgain = await apiCall(
+      'DELETE',
+      `/api/v1/contracts/${fullContract.id}/residents/${coRes.id}`,
+      primary.id,
+    );
+    assert.equal(removeCoResAgain.status, 404);
+    assert.equal(removeCoResAgain.body.code, 'RESIDENT_NOT_FOUND');
   });
 });
