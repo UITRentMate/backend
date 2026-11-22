@@ -657,7 +657,7 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: JWT Access Token cấp từ API Login/Refresh gửi qua header `Authorization: Bearer <token>`.
+      description: "JWT Access Token cấp từ API Login/Refresh gửi qua header `Authorization: Bearer <token>`."
 
   parameters:
     ContractIdParam:
