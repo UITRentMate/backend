@@ -4,11 +4,32 @@ import type { NotificationEventType } from '../constants/phase3-status';
 
 export type NotificationDbClient = PrismaClient | Prisma.TransactionClient;
 
+export interface NotificationPayload {
+  content?: string;
+  actionUrl?: string;
+  relatedEntityType?: string;
+  relatedEntityId?: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface CreateNotificationInput {
   recipientId: string;
   title: string;
   eventType: NotificationEventType | string;
-  payload?: Prisma.InputJsonValue | null;
+  payload?: NotificationPayload | Prisma.InputJsonValue | null;
+}
+
+const MAX_NOTIFICATION_TITLE_LENGTH = 200;
+
+/**
+ * Chuẩn hóa tiêu đề thông báo vừa khít giới hạn VARCHAR(200) của PostgreSQL.
+ */
+export function normalizeNotificationTitle(title: string): string {
+  const trimmed = title.trim();
+  if (trimmed.length <= MAX_NOTIFICATION_TITLE_LENGTH) {
+    return trimmed;
+  }
+  return trimmed.slice(0, MAX_NOTIFICATION_TITLE_LENGTH);
 }
 
 /**
@@ -22,14 +43,14 @@ export async function createNotification(
   return db.notification.create({
     data: {
       recipientId: input.recipientId,
-      title: input.title,
+      title: normalizeNotificationTitle(input.title),
       eventType: input.eventType,
       payload:
         input.payload === undefined
           ? undefined
           : input.payload === null
             ? Prisma.JsonNull
-            : input.payload,
+            : (input.payload as Prisma.InputJsonValue),
     },
   });
 }
@@ -48,14 +69,14 @@ export async function createNotificationsBatch(
   return db.notification.createMany({
     data: inputs.map((item) => ({
       recipientId: item.recipientId,
-      title: item.title,
+      title: normalizeNotificationTitle(item.title),
       eventType: item.eventType,
       payload:
         item.payload === undefined
           ? undefined
           : item.payload === null
             ? Prisma.JsonNull
-            : item.payload,
+            : (item.payload as Prisma.InputJsonValue),
     })),
   });
 }

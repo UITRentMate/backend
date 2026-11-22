@@ -4,7 +4,11 @@ import { describe, test } from 'node:test';
 import {
   CONTRACT_STATUS,
   DEPOSIT_RECEIPT_STATUS,
+  getEventTypesByCategory,
+  getNotificationCategory,
   LANDLORD_APPLICATION_STATUS,
+  NOTIFICATION_CATEGORY,
+  NOTIFICATION_CATEGORY_BY_EVENT,
   NOTIFICATION_EVENT_TYPE,
   REPAIR_ATTACHMENT_STAGE,
   REPAIR_COST_BEARER,
@@ -12,6 +16,7 @@ import {
   REPAIR_TICKET_STATUS,
   RESIDENT_INVITATION_STATUS,
 } from '../src/common/constants/phase3-status';
+import { normalizeNotificationTitle } from '../src/common/utils/notification.util';
 import {
   buildPasswordResetEmailContent,
   loadSmtpConfigFromEnv,
@@ -53,7 +58,38 @@ describe('Phase 3 Shared Status Constants', () => {
     }
     for (const val of Object.values(NOTIFICATION_EVENT_TYPE)) {
       assert.ok(val.length <= 40, `NOTIFICATION_EVENT_TYPE "${val}" vượt quá VARCHAR(40)`);
+      assert.ok(
+        val in NOTIFICATION_CATEGORY_BY_EVENT,
+        `NOTIFICATION_EVENT_TYPE "${val}" chưa được ánh xạ trong NOTIFICATION_CATEGORY_BY_EVENT`,
+      );
     }
+  });
+
+  test('ánh xạ danh mục thông báo (category) & chuẩn hóa tiêu đề hoạt động chính xác', () => {
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED),
+      NOTIFICATION_CATEGORY.FINANCE,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CREATED),
+      NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.REPAIR_TICKET_CREATED),
+      NOTIFICATION_CATEGORY.REPAIR,
+    );
+    assert.equal(
+      getNotificationCategory('UNKNOWN_FUTURE_EVENT'),
+      NOTIFICATION_CATEGORY.SYSTEM,
+    );
+
+    const repairEvents = getEventTypesByCategory(NOTIFICATION_CATEGORY.REPAIR);
+    assert.ok(repairEvents.includes(NOTIFICATION_EVENT_TYPE.REPAIR_TICKET_CREATED));
+    assert.ok(!repairEvents.includes(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED));
+
+    const longTitle = `  ${'A'.repeat(250)}  `;
+    assert.equal(normalizeNotificationTitle(longTitle).length, 200);
+    assert.equal(normalizeNotificationTitle('  Thông báo mới  '), 'Thông báo mới');
   });
 });
 
