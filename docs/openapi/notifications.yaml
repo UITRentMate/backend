@@ -1,0 +1,468 @@
+openapi: 3.1.0
+info:
+  title: RentMate — In-App Notifications API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Quản lý Thông báo In-App (BE-P3-07 / Issue #36)**.
+    Cho phép người dùng `ACTIVE` (TENANT, LANDLORD, ADMIN) xem danh sách thông báo theo bộ lọc danh mục & trạng thái đọc,
+    lấy số thông báo chưa đọc, mở chi tiết (tự động đánh dấu đã đọc theo UC-27), đánh dấu đọc 1 thông báo và đánh dấu đọc tất cả.
+
+    ### 1. Quy tắc bảo mật & phân quyền
+    - Toàn bộ endpoint yêu cầu Bearer JWT hợp lệ của tài khoản đang ở trạng thái `ACTIVE` (`requireActiveUser`).
+    - Mọi truy vấn đọc và cập nhật đều cô lập tuyệt đối theo `recipientId = currentUser.id`.
+    - Truy cập `notificationId` không tồn tại hoặc thuộc về người dùng khác trả về `404 NOTIFICATION_NOT_FOUND` (Anti-IDOR).
+
+    ### 2. Ánh xạ nhóm danh mục (`category`)
+    - `BOOKING_CONTRACT`: Lịch hẹn xem phòng, Yêu cầu thuê, Hợp đồng, Thành viên cư trú.
+    - `FINANCE`: Tiền cọc, Hóa đơn, Thanh toán.
+    - `REPAIR`: Báo cáo sự cố và Sửa chữa.
+    - `SYSTEM`: Xác minh Chủ trọ, Tài khoản, và fallback cho các mã sự kiện mới chưa ánh xạ.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+    license:
+      name: MIT
+      url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+  - url: https://api.rentmate.vn
+    description: Máy chủ chính thức (Production)
+
+tags:
+  - name: Notifications
+    description: Các API quản lý thông báo In-App của người dùng đang đăng nhập.
+
+paths:
+  /api/v1/notifications:
+    get:
+      tags:
+        - Notifications
+      summary: Lấy danh sách thông báo của người dùng hiện tại (NOTI-01)
+      description: |
+        Trả về danh sách thông báo thuộc tài khoản đang đăng nhập, sắp xếp mới nhất trước (`createdAt DESC, id DESC`).
+        Hỗ trợ lọc theo `category`, `eventType`, `isRead` và phân trang (`page`, `limit` hoặc alias `pageSize`).
+        Luôn trả kèm tổng số thông báo chưa đọc toàn cục (`unreadCount`) của người dùng để FE cập nhật badge.
+      operationId: getNotifications
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Số trang hiện tại (bắt đầu từ 1).
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+          description: Số lượng thông báo mỗi trang (tối đa 50). Nếu truyền đồng thời `limit` và `pageSize`, hệ thống ưu tiên `limit`.
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+          description: Alias tương thích ngược cho `limit`.
+        - name: isRead
+          in: query
+          required: false
+          schema:
+            type: boolean
+          description: Lọc theo trạng thái đã đọc (`true` hoặc `false`).
+        - name: category
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/NotificationCategory'
+          description: Lọc theo nhóm danh mục thông báo.
+        - name: eventType
+          in: query
+          required: false
+          schema:
+            type: string
+            pattern: '^[A-Z0-9_]{1,40}$'
+          description: Lọc theo mã sự kiện chi tiết (hỗ trợ cả các mã sự kiện tương lai tối đa 40 ký tự).
+      responses:
+        '200':
+          description: Lấy danh sách thông báo thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedNotificationsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/unread-count:
+    get:
+      tags:
+        - Notifications
+      summary: Đếm số thông báo chưa đọc (NOTI-05)
+      description: Endpoint nhẹ phục vụ FE polling hiển thị số badge chưa đọc trên thanh điều hướng.
+      operationId: getUnreadNotificationCount
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Lấy số lượng chưa đọc thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnreadCountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/read-all:
+    patch:
+      tags:
+        - Notifications
+      summary: Đánh dấu toàn bộ thông báo của người dùng là đã đọc (NOTI-04)
+      operationId: markAllNotificationsAsRead
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Đánh dấu toàn bộ thông báo đã đọc thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MarkAllReadResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/{notificationId}:
+    get:
+      tags:
+        - Notifications
+      summary: Xem chi tiết một thông báo và tự động đánh dấu đã đọc (NOTI-02 / UC-27)
+      description: |
+        Trả về thông tin chi tiết thông báo theo `notificationId`. Nếu thông báo thuộc về người dùng hiện tại và đang ở trạng thái chưa đọc (`isRead = false`),
+        hệ thống tự động chuyển `isRead = true` trong CSDL và trả về `unreadCount` mới nhất.
+      operationId: getNotificationDetail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationIdParam'
+      responses:
+        '200':
+          description: Lấy chi tiết thông báo thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationActionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotificationNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/notifications/{notificationId}/read:
+    patch:
+      tags:
+        - Notifications
+      summary: Đánh dấu một thông báo là đã đọc (NOTI-03)
+      description: Thao tác idempotent — gọi nhiều lần trên thông báo thuộc quyền sở hữu đều trả về `200 OK` với `isRead = true` và `unreadCount` hiện tại.
+      operationId: markNotificationAsRead
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationIdParam'
+      responses:
+        '200':
+          description: Đánh dấu đã đọc thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationActionResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotificationNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    NotificationIdParam:
+      name: notificationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID của thông báo.
+
+  schemas:
+    NotificationCategory:
+      type: string
+      enum:
+        - BOOKING_CONTRACT
+        - FINANCE
+        - REPAIR
+        - SYSTEM
+      example: "BOOKING_CONTRACT"
+
+    NotificationItem:
+      type: object
+      required:
+        - id
+        - eventType
+        - category
+        - title
+        - content
+        - actionUrl
+        - relatedEntityType
+        - relatedEntityId
+        - payload
+        - isRead
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "123e4567-e89b-12d3-a456-426614174000"
+        eventType:
+          type: string
+          maxLength: 40
+          example: "VIEWING_APPOINTMENT_CREATED"
+        category:
+          $ref: '#/components/schemas/NotificationCategory'
+        title:
+          type: string
+          maxLength: 200
+          example: "Có lịch hẹn xem phòng mới"
+        content:
+          type:
+            - string
+            - 'null'
+          example: "Người thuê đã gửi yêu cầu xem phòng P.101."
+        actionUrl:
+          type:
+            - string
+            - 'null'
+          example: "/landlord/viewing-appointments/987fcdeb-51a2-43f7-9876-ba0987654321"
+        relatedEntityType:
+          type:
+            - string
+            - 'null'
+          example: "VIEWING_APPOINTMENT"
+        relatedEntityId:
+          type:
+            - string
+            - 'null'
+          example: "987fcdeb-51a2-43f7-9876-ba0987654321"
+        payload:
+          type:
+            - object
+            - 'null'
+          additionalProperties: true
+        isRead:
+          type: boolean
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+          example: "2026-11-22T03:00:00.000Z"
+
+    PaginatedNotificationsResponse:
+      type: object
+      required:
+        - items
+        - total
+        - page
+        - limit
+        - totalPages
+        - unreadCount
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationItem'
+        total:
+          type: integer
+          minimum: 0
+          example: 12
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          example: 20
+        totalPages:
+          type: integer
+          minimum: 0
+          example: 1
+        unreadCount:
+          type: integer
+          minimum: 0
+          example: 4
+
+    UnreadCountResponse:
+      type: object
+      required:
+        - unreadCount
+      properties:
+        unreadCount:
+          type: integer
+          minimum: 0
+          example: 4
+
+    NotificationActionResponse:
+      allOf:
+        - $ref: '#/components/schemas/NotificationItem'
+        - type: object
+          required:
+            - unreadCount
+          properties:
+            unreadCount:
+              type: integer
+              minimum: 0
+              example: 3
+
+    MarkAllReadResponse:
+      type: object
+      required:
+        - updatedCount
+        - unreadCount
+      properties:
+        updatedCount:
+          type: integer
+          minimum: 0
+          example: 4
+        unreadCount:
+          type: integer
+          enum:
+            - 0
+          example: 0
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          enum:
+            - false
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu đầu vào không hợp lệ"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        traceId:
+          type: string
+          format: uuid
+          example: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+  responses:
+    ValidationError:
+      description: Dữ liệu đầu vào hoặc tham số truy vấn không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            errors:
+              notificationId:
+                - "Mã thông báo không đúng định dạng UUID"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Unauthorized:
+      description: Chưa xác thực (thiếu, sai hoặc hết hạn Bearer JWT Token)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    Forbidden:
+      description: Tài khoản bị khóa hoặc không ở trạng thái ACTIVE
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "ACCOUNT_LOCKED"
+            message: "Tài khoản đã bị khóa hoặc chưa kích hoạt"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    NotificationNotFound:
+      description: Thông báo không tồn tại hoặc không thuộc quyền sở hữu của người dùng
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "NOTIFICATION_NOT_FOUND"
+            message: "Thông báo không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    InternalError:
+      description: Lỗi máy chủ nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
