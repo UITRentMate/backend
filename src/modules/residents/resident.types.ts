@@ -187,6 +187,46 @@ export interface ReceivedInvitationRow {
   invitedBy: UserSummaryRow;
 }
 
+export interface ContractMutationRow {
+  id: string;
+  status: string;
+  tenantId: string;
+  room: {
+    id: string;
+    roomCode: string;
+    maxOccupants: number;
+    property: {
+      id: string;
+      landlordId: string;
+    };
+  };
+}
+
+export interface InviteTargetUserRow extends UserSummaryRow {
+  role: string;
+  accountStatus: string;
+}
+
+export interface ContractResidentRow {
+  joinedAt: Date;
+  leftAt: Date | null;
+  user: {
+    id: string;
+    fullName: string;
+  };
+}
+
+export interface LockedInvitationRow {
+  id: string;
+  contractId: string;
+  invitedUserId: string;
+  invitedById: string;
+  status: string;
+  expiresAt: Date;
+  invitedUser: UserSummaryRow;
+  contract: ContractMutationRow;
+}
+
 export interface AcceptedInvitationTxResult {
   invitationId: string;
   contractId: string;
@@ -225,39 +265,6 @@ export interface InvitationAccessContext {
   invitedById: string;
   contractTenantId: string;
   landlordId: string;
-}
-
-export interface CreateInvitationTxParams {
-  contractId: string;
-  identifier: ParsedInviteIdentifier;
-  invitedById: string;
-  now?: Date;
-}
-
-export interface AcceptInvitationTxParams {
-  invitationId: string;
-  actorId: string;
-  now?: Date;
-}
-
-export interface RejectInvitationTxParams {
-  invitationId: string;
-  actorId: string;
-  now?: Date;
-}
-
-export interface CancelInvitationTxParams {
-  invitationId: string;
-  actorId: string;
-  now?: Date;
-}
-
-export interface RemoveResidentTxParams {
-  contractId: string;
-  targetUserId: string;
-  actorId: string;
-  removalType: ResidentRemovalType;
-  now?: Date;
 }
 
 export type AcceptInvitationOutcome =

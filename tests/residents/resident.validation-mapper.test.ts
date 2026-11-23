@@ -15,7 +15,7 @@ import {
   mapReceivedInvitationItem,
   mapRemoveResidentResponse,
 } from '../../src/modules/residents/resident.mapper';
-import { formatNotificationTitle } from '../../src/modules/residents/resident.repository';
+import { formatNotificationTitle } from '../../src/modules/residents/resident.service';
 
 const VALID_UUID_1 = '11111111-2222-4333-8444-555555555555';
 const VALID_UUID_2 = '22222222-3333-4444-8555-666666666666';
