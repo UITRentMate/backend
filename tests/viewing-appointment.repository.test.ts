@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { afterEach, test } from 'node:test';
-import { ApiError } from '../src/common/errors/api-error';
 import { prisma } from '../src/infrastructure/database/prisma';
 import { ViewingAppointmentRepository } from '../src/modules/viewing-appointments/viewing-appointment.repository';
 
@@ -12,6 +13,20 @@ function stub(delegate: any, name: string, implementation: (...args: any[]) => a
   undo.push(() => { delegate[name] = original; });
 }
 const appointmentId = '550e8400-e29b-41d4-a716-446655440020';
+const slotId = '550e8400-e29b-41d4-a716-446655440021';
+
+test('viewing-appointment.repository.ts stays pure persistence without notification, ApiError, or $transaction logic', () => {
+  const repoSource = fs.readFileSync(
+    path.resolve(__dirname, '../src/modules/viewing-appointments/viewing-appointment.repository.ts'),
+    'utf8',
+  );
+  assert.ok(!repoSource.includes('$transaction'));
+  assert.ok(!repoSource.includes('createNotification'));
+  assert.ok(!repoSource.includes('NOTIFICATION_EVENT_TYPE'));
+  assert.ok(!repoSource.includes('ApiError'));
+  assert.ok(!repoSource.includes('formatRoomLabel'));
+  assert.ok(!repoSource.includes('NotificationMeta'));
+});
 
 test('findAppointmentsList has a deterministic ID tie-breaker for equal creation times', async () => {
   let findArgs: any;
@@ -26,114 +41,118 @@ test('findAppointmentsList has a deterministic ID tie-breaker for equal creation
   assert.deepEqual(findArgs.orderBy, [{ createdAt: 'desc' }, { id: 'desc' }]);
 });
 
-test('rejectAppointment reports conflict when the pending state was already consumed', async () => {
+test('rejectAppointment performs atomic PENDING updateMany using passed tx client and returns count', async () => {
   let updateArgs: any;
-  let notificationCreated = false;
-  stub(prisma, '$transaction', async (work: any) => work(prisma));
-  stub(prisma.viewingAppointment, 'updateMany', async (args: any) => { updateArgs = args; return { count: 0 }; });
-  stub(prisma.notification, 'create', async () => { notificationCreated = true; return {}; });
-  stub(prisma.viewingAppointment, 'update', async () => ({ id: appointmentId }));
+  const fakeTx: any = {
+    viewingAppointment: {
+      updateMany: async (args: any) => {
+        updateArgs = args;
+        return { count: 0 };
+      },
+    },
+  };
 
-  await assert.rejects(
-    () => ViewingAppointmentRepository.rejectAppointment(appointmentId, 'No longer available', { tenantId: '550e8400-e29b-41d4-a716-446655440003' }),
-    (error: unknown) => error instanceof ApiError && error.statusCode === 409,
+  const result = await ViewingAppointmentRepository.rejectAppointment(
+    appointmentId,
+    'No longer available',
+    fakeTx,
   );
+
+  assert.deepEqual(result, { count: 0 });
   assert.deepEqual(updateArgs.where, { id: appointmentId, status: 'PENDING' });
-  assert.equal(notificationCreated, false);
-});
-
-test('cancelAppointment updates only the state observed by the service', async () => {
-  let updateArgs: any;
-  let notificationCreated = false;
-  stub(prisma, '$transaction', async (work: any) => work(prisma));
-  stub(prisma.viewingAppointment, 'updateMany', async (args: any) => { updateArgs = args; return { count: 0 }; });
-  stub(prisma.notification, 'create', async () => { notificationCreated = true; return {}; });
-  stub(prisma.viewingAppointment, 'update', async () => ({ id: appointmentId }));
-
-  await assert.rejects(
-    () => ViewingAppointmentRepository.cancelAppointment(appointmentId, 'Plans changed', 'CONFIRMED' as any, { recipientId: '550e8400-e29b-41d4-a716-446655440001', canceledByRole: 'TENANT' }),
-    (error: unknown) => error instanceof ApiError && error.statusCode === 409,
-  );
-  assert.deepEqual(updateArgs.where, { id: appointmentId, status: 'CONFIRMED' });
-  assert.equal(notificationCreated, false);
-});
-
-test('ViewingAppointmentRepository creates atomic notifications on create, confirm, reject, and cancel', async () => {
-  const createdNotifications: any[] = [];
-  stub(prisma, '$transaction', async (work: any) => work(prisma));
-  stub(prisma.notification, 'create', async (args: any) => {
-    createdNotifications.push(args.data);
-    return { id: 'notif-1', ...args.data };
+  assert.deepEqual(updateArgs.data, {
+    status: 'REJECTED',
+    rejectionReason: 'No longer available',
   });
+});
 
-  // 1. Create appointment -> notify landlord
-  stub(prisma.viewingAppointment, 'create', async () => ({ id: appointmentId, status: 'PENDING' }));
-  stub(prisma.viewingTimeOption, 'create', async () => ({ id: 'slot-1' }));
-  await ViewingAppointmentRepository.createAppointmentWithSlots(
+test('cancelAppointment updates only the expected status using passed tx client and returns count', async () => {
+  let updateArgs: any;
+  const fakeTx: any = {
+    viewingAppointment: {
+      updateMany: async (args: any) => {
+        updateArgs = args;
+        return { count: 1 };
+      },
+    },
+  };
+
+  const result = await ViewingAppointmentRepository.cancelAppointment(
+    appointmentId,
+    'Plans changed',
+    'CONFIRMED',
+    fakeTx,
+  );
+
+  assert.deepEqual(result, { count: 1 });
+  assert.deepEqual(updateArgs.where, { id: appointmentId, status: 'CONFIRMED' });
+  assert.deepEqual(updateArgs.data, {
+    status: 'CANCELLED',
+    cancellationReason: 'Plans changed',
+  });
+});
+
+test('createAppointmentWithSlots, findConflictingConfirmedAppointment, and confirmAppointmentSelection use passed tx client', async () => {
+  const calls: string[] = [];
+  const fakeTx: any = {
+    viewingAppointment: {
+      create: async (args: any) => {
+        calls.push(`appointment.create:${args.data.roomId}`);
+        return { id: appointmentId, status: 'PENDING' };
+      },
+      findFirst: async (args: any) => {
+        calls.push(`appointment.findFirst:${args.where.roomId}:${args.where.status}`);
+        return null;
+      },
+      update: async (args: any) => {
+        calls.push(`appointment.update:${args.data.status}:${args.data.selectedSlotId}`);
+        return {
+          id: appointmentId,
+          selectedSlot: { id: slotId, startAt: new Date('2026-12-01T09:00:00Z') },
+        };
+      },
+    },
+    viewingTimeOption: {
+      create: async (args: any) => {
+        calls.push(`slot.create:${args.data.appointmentId}`);
+        return { id: slotId };
+      },
+      update: async (args: any) => {
+        calls.push(`slot.update:${args.where.id}:${args.data.isSelected}`);
+        return { id: slotId };
+      },
+    },
+  };
+
+  const created = await ViewingAppointmentRepository.createAppointmentWithSlots(
     '550e8400-e29b-41d4-a716-446655440003',
     '0901234567',
     { roomId: '550e8400-e29b-41d4-a716-446655440010', proposedSlots: ['2026-12-01T09:00:00Z'] },
-    { landlordId: '550e8400-e29b-41d4-a716-446655440001', roomCode: 'P.101', propertyName: 'Khu trọ A' },
+    fakeTx,
   );
+  assert.equal(created.id, appointmentId);
 
-  // 2. Confirm appointment -> notify tenant
-  const slotId = '550e8400-e29b-41d4-a716-446655440021';
-  stub(prisma.viewingAppointment, 'findUnique', async () => ({
-    id: appointmentId,
-    roomId: '550e8400-e29b-41d4-a716-446655440010',
-    tenantId: '550e8400-e29b-41d4-a716-446655440003',
-    status: 'PENDING',
-    timeOptions: [{ id: slotId, startAt: new Date('2026-12-01T09:00:00Z') }],
-    room: { roomCode: 'P.101', property: { name: 'Khu trọ A' } },
-  }));
-  stub(prisma.viewingAppointment, 'findFirst', async () => null);
-  stub(prisma.viewingTimeOption, 'update', async () => ({ id: slotId }));
-  stub(prisma.viewingAppointment, 'update', async () => ({
-    id: appointmentId,
-    selectedSlot: { id: slotId, startAt: new Date('2026-12-01T09:00:00Z') },
-  }));
-  await ViewingAppointmentRepository.confirmAppointmentInTx(appointmentId, slotId);
-
-  // 3. Reject & 4. Cancel
-  stub(prisma.viewingAppointment, 'updateMany', async () => ({ count: 1 }));
-  await ViewingAppointmentRepository.rejectAppointment(appointmentId, 'Bận đột xuất', {
-    tenantId: '550e8400-e29b-41d4-a716-446655440003',
-    roomCode: 'P.101',
-  });
-  await ViewingAppointmentRepository.cancelAppointment(appointmentId, 'Đổi kế hoạch', 'PENDING', {
-    recipientId: '550e8400-e29b-41d4-a716-446655440001',
-    roomCode: 'P.101',
-    canceledByRole: 'TENANT',
-  });
-
-  assert.equal(createdNotifications.length, 4);
-  assert.equal(createdNotifications[0].eventType, 'VIEWING_APPOINTMENT_CREATED');
-  assert.equal(createdNotifications[0].recipientId, '550e8400-e29b-41d4-a716-446655440001');
-  assert.equal(createdNotifications[1].eventType, 'VIEWING_APPOINTMENT_CONFIRMED');
-  assert.equal(createdNotifications[1].recipientId, '550e8400-e29b-41d4-a716-446655440003');
-  assert.equal(createdNotifications[2].eventType, 'VIEWING_APPOINTMENT_REJECTED');
-  assert.equal(createdNotifications[2].recipientId, '550e8400-e29b-41d4-a716-446655440003');
-  assert.equal(createdNotifications[3].eventType, 'VIEWING_APPOINTMENT_CANCELLED');
-  assert.equal(createdNotifications[3].recipientId, '550e8400-e29b-41d4-a716-446655440001');
-});
-
-test('confirmAppointmentInTx maps a serializable conflict to a slot conflict', async () => {
-  let transactionOptions: any;
-  let notificationCreated = false;
-  stub(prisma, '$transaction', async (_work: unknown, options: any) => {
-    transactionOptions = options;
-    throw { code: 'P2034' };
-  });
-  stub(prisma.notification, 'create', async () => {
-    notificationCreated = true;
-    return {};
-  });
-  stub(prisma.viewingAppointment, 'findUnique', async () => ({ status: 'PENDING' }));
-
-  await assert.rejects(
-    () => ViewingAppointmentRepository.confirmAppointmentInTx(appointmentId, '550e8400-e29b-41d4-a716-446655440021'),
-    (error: unknown) => error instanceof ApiError && error.statusCode === 409 && error.code === 'SLOT_CONFLICT',
+  const conflict = await ViewingAppointmentRepository.findConflictingConfirmedAppointment(
+    appointmentId,
+    '550e8400-e29b-41d4-a716-446655440010',
+    new Date('2026-12-01T08:30:00Z'),
+    new Date('2026-12-01T09:30:00Z'),
+    fakeTx,
   );
-  assert.equal(transactionOptions.isolationLevel, 'Serializable');
-  assert.equal(notificationCreated, false);
+  assert.equal(conflict, null);
+
+  const confirmed = await ViewingAppointmentRepository.confirmAppointmentSelection(
+    appointmentId,
+    slotId,
+    fakeTx,
+  );
+  assert.equal(confirmed.id, appointmentId);
+
+  assert.deepEqual(calls, [
+    'appointment.create:550e8400-e29b-41d4-a716-446655440010',
+    `slot.create:${appointmentId}`,
+    'appointment.findFirst:550e8400-e29b-41d4-a716-446655440010:CONFIRMED',
+    `slot.update:${slotId}:true`,
+    `appointment.update:CONFIRMED:${slotId}`,
+  ]);
 });

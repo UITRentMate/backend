@@ -1,5 +1,8 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
 import { ApiError } from '../../common/errors/api-error';
+import { NOTIFICATION_EVENT_TYPE } from '../../common/constants/phase3-status';
+import { createNotification } from '../../common/utils/notification.util';
 import { ViewingAppointmentRepository } from './viewing-appointment.repository';
 import {
   mapToViewingAppointmentItemDTO,
@@ -7,6 +10,7 @@ import {
   mapToViewingSlotDTO,
 } from './viewing-appointment.mapper';
 import {
+  DEFAULT_VIEWING_DURATION_MINUTES,
   VIEWING_STATUS,
   type CreateViewingAppointmentInput,
   type ConfirmViewingAppointmentInput,
@@ -20,6 +24,31 @@ import {
   type PaginatedViewingAppointmentsDTO,
   type ViewingAppointmentDetailDTO,
 } from './viewing-appointment.types';
+
+function formatRoomLabel(roomCode?: string | null, propertyName?: string | null): string {
+  if (roomCode && propertyName) {
+    return `phòng ${roomCode} (${propertyName})`;
+  }
+  if (roomCode) {
+    return `phòng ${roomCode}`;
+  }
+  return 'phòng trọ';
+}
+
+function buildViewingNotificationPayload(
+  appointmentId: string,
+  content: string,
+  actionUrl: string,
+  metadata?: Record<string, Prisma.InputJsonValue | null | undefined>,
+) {
+  return {
+    content,
+    actionUrl,
+    relatedEntityType: 'VIEWING_APPOINTMENT',
+    relatedEntityId: appointmentId,
+    ...(metadata ? { metadata } : {}),
+  };
+}
 
 export class ViewingAppointmentService {
   /**
@@ -79,17 +108,31 @@ export class ViewingAppointmentService {
       );
     }
 
-    // Tạo lịch và các slot đề xuất trong một transaction
-    const appointment = await ViewingAppointmentRepository.createAppointmentWithSlots(
-      tenantId,
-      contactPhone,
-      input,
-      {
-        landlordId: room.property.landlordId,
-        roomCode: room.roomCode,
-        propertyName: room.property.name,
-      },
-    );
+    // Tạo lịch, các slot đề xuất và thông báo In-App trong cùng một transaction
+    const roomLabel = formatRoomLabel(room.roomCode, room.property.name);
+    const appointment = await prisma.$transaction(async (tx) => {
+      const created = await ViewingAppointmentRepository.createAppointmentWithSlots(
+        tenantId,
+        contactPhone,
+        input,
+        tx,
+      );
+
+      if (room.property.landlordId) {
+        await createNotification(tx, {
+          recipientId: room.property.landlordId,
+          title: 'Có lịch hẹn xem phòng mới',
+          eventType: NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CREATED,
+          payload: buildViewingNotificationPayload(
+            created.id,
+            `Người thuê vừa đặt lịch hẹn xem ${roomLabel}.`,
+            `/landlord/viewing-appointments/${created.id}`,
+          ),
+        });
+      }
+
+      return created;
+    });
 
     return {
       appointmentId: appointment.id,
@@ -201,11 +244,101 @@ export class ViewingAppointmentService {
       );
     }
 
-    // Thực hiện xác nhận an toàn chống double-booking trong transaction
-    const updated = await ViewingAppointmentRepository.confirmAppointmentInTx(
-      appointmentId,
-      input.selectedSlotId,
-    );
+    // Thực hiện xác nhận an toàn chống double-booking và phát thông báo trong cùng Serializable transaction
+    let updated: Awaited<ReturnType<typeof ViewingAppointmentRepository.confirmAppointmentSelection>>;
+    try {
+      updated = await prisma.$transaction(
+        async (tx) => {
+          const txAppointment = await ViewingAppointmentRepository.findAppointmentById(appointmentId, tx);
+
+          if (!txAppointment || txAppointment.room?.property?.landlordId !== landlordId) {
+            throw new ApiError(
+              404,
+              'APPOINTMENT_NOT_FOUND',
+              'Lịch hẹn không tồn tại hoặc bạn không có quyền truy cập',
+            );
+          }
+
+          if (txAppointment.status !== VIEWING_STATUS.PENDING) {
+            throw new ApiError(
+              409,
+              'CONFLICT',
+              `Không thể xác nhận lịch hẹn ở trạng thái ${txAppointment.status}`,
+            );
+          }
+
+          const chosenSlot = txAppointment.timeOptions.find((slot) => slot.id === input.selectedSlotId);
+          if (!chosenSlot) {
+            throw new ApiError(
+              400,
+              'VALIDATION_ERROR',
+              'Khung giờ được chọn không thuộc danh sách đề xuất của lịch hẹn này',
+              { selectedSlotId: ['Mã khung giờ không thuộc lịch hẹn này'] },
+            );
+          }
+
+          const slotStart = chosenSlot.startAt;
+          const durationMs = DEFAULT_VIEWING_DURATION_MINUTES * 60 * 1000;
+          const conflictingAppointment =
+            await ViewingAppointmentRepository.findConflictingConfirmedAppointment(
+              appointmentId,
+              txAppointment.roomId,
+              new Date(slotStart.getTime() - durationMs),
+              new Date(slotStart.getTime() + durationMs),
+              tx,
+            );
+
+          if (conflictingAppointment) {
+            throw new ApiError(
+              409,
+              'SLOT_CONFLICT',
+              'Khung giờ này đã bị trùng với một lịch hẹn khác đã xác nhận cho phòng này',
+            );
+          }
+
+          const confirmed = await ViewingAppointmentRepository.confirmAppointmentSelection(
+            appointmentId,
+            input.selectedSlotId,
+            tx,
+          );
+
+          const roomLabel = formatRoomLabel(
+            txAppointment.room?.roomCode,
+            txAppointment.room?.property?.name,
+          );
+          await createNotification(tx, {
+            recipientId: txAppointment.tenantId,
+            title: 'Lịch hẹn xem phòng đã được xác nhận',
+            eventType: NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CONFIRMED,
+            payload: buildViewingNotificationPayload(
+              appointmentId,
+              `Chủ trọ đã xác nhận lịch hẹn xem ${roomLabel}.`,
+              `/viewing-appointments/${appointmentId}`,
+              {
+                selectedSlotId: input.selectedSlotId,
+                startAt: chosenSlot.startAt.toISOString(),
+              },
+            ),
+          });
+
+          return confirmed;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') {
+        const current = await ViewingAppointmentRepository.findAppointmentStatusById(appointmentId);
+        if (current && current.status !== VIEWING_STATUS.PENDING) {
+          throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã được xử lý bởi một yêu cầu đồng thời khác');
+        }
+        throw new ApiError(
+          409,
+          'SLOT_CONFLICT',
+          'Khung giờ này vừa được xác nhận cho một lịch hẹn khác của phòng',
+        );
+      }
+      throw error;
+    }
 
     return {
       appointmentId: updated.id,
@@ -252,18 +385,35 @@ export class ViewingAppointmentService {
       );
     }
 
-    const updated = await ViewingAppointmentRepository.rejectAppointment(
-      appointmentId,
-      input.reason,
-      {
-        tenantId: appointment.tenantId,
-        roomCode: appointment.room?.roomCode,
-        propertyName: appointment.room?.property?.name,
-      },
-    );
+    const roomLabel = formatRoomLabel(appointment.room?.roomCode, appointment.room?.property?.name);
+
+    await prisma.$transaction(async (tx) => {
+      const result = await ViewingAppointmentRepository.rejectAppointment(
+        appointmentId,
+        input.reason,
+        tx,
+      );
+
+      if (result.count === 0) {
+        throw new ApiError(409, 'CONFLICT', 'Lịch hẹn không còn ở trạng thái PENDING để từ chối');
+      }
+
+      if (appointment.tenantId) {
+        await createNotification(tx, {
+          recipientId: appointment.tenantId,
+          title: 'Lịch hẹn xem phòng bị từ chối',
+          eventType: NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_REJECTED,
+          payload: buildViewingNotificationPayload(
+            appointmentId,
+            `Chủ trọ đã từ chối lịch hẹn xem ${roomLabel}. Lý do: ${input.reason}`,
+            `/viewing-appointments/${appointmentId}`,
+          ),
+        });
+      }
+    });
 
     return {
-      appointmentId: updated.id,
+      appointmentId,
       status: VIEWING_STATUS.REJECTED,
       rejectionReason: input.reason,
     };
@@ -337,23 +487,43 @@ export class ViewingAppointmentService {
     const recipientId = isTenantOwner
       ? appointment.room?.property?.landlordId
       : appointment.tenantId;
+    const expectedStatus = appointment.status as
+      | typeof VIEWING_STATUS.PENDING
+      | typeof VIEWING_STATUS.CONFIRMED;
+    const roomLabel = formatRoomLabel(appointment.room?.roomCode, appointment.room?.property?.name);
+    const actorLabel = isTenantOwner ? 'Người thuê' : 'Chủ trọ';
+    const actionUrl = isTenantOwner
+      ? `/landlord/viewing-appointments/${appointmentId}`
+      : `/viewing-appointments/${appointmentId}`;
 
-    const updated = await ViewingAppointmentRepository.cancelAppointment(
-      appointmentId,
-      input.reason,
-      appointment.status as typeof VIEWING_STATUS.PENDING | typeof VIEWING_STATUS.CONFIRMED,
-      recipientId
-        ? {
-            recipientId,
-            roomCode: appointment.room?.roomCode,
-            propertyName: appointment.room?.property?.name,
-            canceledByRole: isTenantOwner ? 'TENANT' : 'LANDLORD',
-          }
-        : undefined,
-    );
+    await prisma.$transaction(async (tx) => {
+      const result = await ViewingAppointmentRepository.cancelAppointment(
+        appointmentId,
+        input.reason,
+        expectedStatus,
+        tx,
+      );
+
+      if (result.count === 0) {
+        throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã được xử lý bởi một yêu cầu đồng thời khác');
+      }
+
+      if (recipientId) {
+        await createNotification(tx, {
+          recipientId,
+          title: 'Lịch hẹn xem phòng đã bị hủy',
+          eventType: NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CANCELLED,
+          payload: buildViewingNotificationPayload(
+            appointmentId,
+            `${actorLabel} đã hủy lịch hẹn xem ${roomLabel}. Lý do: ${input.reason}`,
+            actionUrl,
+          ),
+        });
+      }
+    });
 
     return {
-      appointmentId: updated.id,
+      appointmentId,
       status: VIEWING_STATUS.CANCELLED,
       cancellationReason: input.reason,
     };

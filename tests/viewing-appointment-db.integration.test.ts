@@ -82,12 +82,25 @@ test('Live DB: concurrent confirmations of one room/time slot cannot both succee
     )));
     assert.deepEqual(results.map(({ response }) => response.status).sort(), [200, 409]);
     assert.equal(results.find(({ response }) => response.status === 409)?.body.code, 'SLOT_CONFLICT');
-    const finalRows = await prisma.viewingAppointment.findMany({ where: { id: { in: appointmentIds } }, select: { status: true } });
+    const finalRows = await prisma.viewingAppointment.findMany({ where: { id: { in: appointmentIds } }, select: { id: true, tenantId: true, status: true } });
     assert.equal(finalRows.filter((row) => row.status === 'CONFIRMED').length, 1);
+    const confirmedRow = finalRows.find((row) => row.status === 'CONFIRMED')!;
+    const pendingRow = finalRows.find((row) => row.status !== 'CONFIRMED')!;
+    const notifications = await prisma.notification.findMany({
+      where: { recipientId: { in: tenants.map((tenant) => tenant.id) } },
+      select: { recipientId: true, eventType: true },
+    });
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0].recipientId, confirmedRow.tenantId);
+    assert.equal(notifications[0].eventType, 'VIEWING_APPOINTMENT_CONFIRMED');
+    assert.ok(notifications.every((notif) => notif.recipientId !== pendingRow.tenantId));
   } finally {
     if (appointmentIds.length) await prisma.viewingAppointment.deleteMany({ where: { id: { in: appointmentIds } } }).catch(() => {});
     if (roomId) await prisma.room.delete({ where: { id: roomId } }).catch(() => {});
     if (propertyId) await prisma.property.delete({ where: { id: propertyId } }).catch(() => {});
-    if (users.length) await prisma.user.deleteMany({ where: { id: { in: users } } }).catch(() => {});
+    if (users.length) {
+      await prisma.notification.deleteMany({ where: { recipientId: { in: users } } }).catch(() => {});
+      await prisma.user.deleteMany({ where: { id: { in: users } } }).catch(() => {});
+    }
   }
 });
