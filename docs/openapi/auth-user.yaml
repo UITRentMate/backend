@@ -167,8 +167,8 @@ paths:
         - Users
       summary: Xem thông tin tài khoản hiện tại
       description: |
-        Lấy thông tin tài khoản của người dùng đang đăng nhập qua JWT Bearer token.
-        Tuyệt đối không bao giờ trả về trường `passwordHash`.
+        Lấy thông tin tài khoản và hồ sơ cá nhân của người dùng đang đăng nhập qua JWT Bearer token.
+        Tuyệt đối không bao giờ trả về trường `passwordHash` hoặc `avatarCloudinaryPublicId`.
       operationId: getCurrentUser
       security:
         - BearerAuth: []
@@ -340,6 +340,9 @@ components:
         - phone
         - role
         - status
+        - avatarUrl
+        - dateOfBirth
+        - address
       properties:
         userId:
           type: string
@@ -363,6 +366,23 @@ components:
           type: string
           enum: [ACTIVE, LOCKED, INACTIVE]
           example: "ACTIVE"
+        avatarUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          example: "https://res.cloudinary.com/rentmate/image/upload/v1731835000/rentmate/avatars/user-1.webp"
+        dateOfBirth:
+          type:
+            - string
+            - "null"
+          format: date
+          example: "2000-05-15"
+        address:
+          type:
+            - string
+            - "null"
+          example: "KTX Khu B ĐHQG, TP. Thủ Đức, TP.HCM"
 
     ApiErrorResponse:
       type: object

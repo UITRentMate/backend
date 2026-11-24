@@ -1,0 +1,288 @@
+openapi: 3.1.0
+info:
+  title: RentMate — User Profile & Auth Recovery API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Hồ sơ cá nhân người dùng (BE-P3-01 Phần 1)**.
+    Bao gồm các endpoint xem thông tin hồ sơ cá nhân (`GET /api/v1/users/me`) và cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`).
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: User Profile
+    description: Các API xem và cập nhật thông tin hồ sơ cá nhân của người dùng đang đăng nhập.
+
+paths:
+  /api/v1/users/me:
+    get:
+      tags:
+        - User Profile
+      summary: Xem thông tin hồ sơ cá nhân hiện tại
+      description: |
+        Trả về đầy đủ thông tin hồ sơ của người dùng đang đăng nhập (`ACTIVE`) qua JWT Bearer token.
+        Giữ tương thích ngược 100% với 6 trường cơ bản (`userId`, `fullName`, `email`, `phone`, `role`, `status`) và bổ sung `avatarUrl`, `dateOfBirth`, `address`.
+        Tuyệt đối không bao giờ trả về `passwordHash` hoặc `avatarCloudinaryPublicId`.
+      operationId: getMyProfile
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Thông tin hồ sơ cá nhân người dùng
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    put:
+      tags:
+        - User Profile
+      summary: Cập nhật thông tin hồ sơ cá nhân
+      description: |
+        Cập nhật một phần hoặc toàn bộ các trường được phép trong hồ sơ cá nhân của người dùng đang đăng nhập:
+        `fullName`, `phone`, `dateOfBirth`, `address`.
+        - Không cho phép thay đổi hoặc truyền thêm các trường nhạy cảm/bất biến (`email`, `role`, `accountStatus`, `passwordHash`, `id`, ...); các trường lạ sẽ bị từ chối với `400 VALIDATION_ERROR`.
+        - `dateOfBirth` và `address` chấp nhận `null` để xóa dữ liệu hiện tại; `fullName` và `phone` không chấp nhận `null`.
+        - `dateOfBirth` phải đúng định dạng lịch `YYYY-MM-DD`, từ `1900-01-01` trở đi và đủ 16 tuổi tính đến ngày hiện tại (UTC).
+      operationId: updateMyProfile
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserProfileRequest'
+            examples:
+              partialUpdate:
+                summary: Cập nhật họ tên và địa chỉ
+                value:
+                  fullName: "Nguyễn Văn A"
+                  address: "KTX Khu B ĐHQG, TP. Thủ Đức, TP.HCM"
+              fullProfileUpdate:
+                summary: Cập nhật đầy đủ hồ sơ
+                value:
+                  fullName: "Nguyễn Văn A"
+                  phone: "0912345678"
+                  dateOfBirth: "2000-05-15"
+                  address: "123 Võ Văn Ngân, TP. Thủ Đức, TP.HCM"
+              clearNullableFields:
+                summary: Xóa ngày sinh và địa chỉ bằng null
+                value:
+                  dateOfBirth: null
+                  address: null
+      responses:
+        '200':
+          description: Cập nhật hồ sơ cá nhân thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/PhoneConflictError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT Access Token cấp từ API Login hoặc Refresh, gửi qua Authorization header Bearer.
+
+  schemas:
+    UserProfileResponse:
+      type: object
+      required:
+        - userId
+        - fullName
+        - email
+        - phone
+        - role
+        - status
+        - avatarUrl
+        - dateOfBirth
+        - address
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        fullName:
+          type: string
+          example: "Nguyễn Văn A"
+        email:
+          type: string
+          format: email
+          example: "nguyenvana@example.com"
+        phone:
+          type: string
+          example: "0901234567"
+        role:
+          type: string
+          enum: [TENANT, LANDLORD, ADMIN]
+          example: "TENANT"
+        status:
+          type: string
+          enum: [ACTIVE, LOCKED, INACTIVE]
+          example: "ACTIVE"
+        avatarUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          example: "https://res.cloudinary.com/rentmate/image/upload/v1731835000/rentmate/avatars/user-1.webp"
+        dateOfBirth:
+          type:
+            - string
+            - "null"
+          format: date
+          example: "2000-05-15"
+          description: Ngày sinh định dạng YYYY-MM-DD hoặc null nếu chưa thiết lập
+        address:
+          type:
+            - string
+            - "null"
+          example: "KTX Khu B ĐHQG, TP. Thủ Đức, TP.HCM"
+
+    UpdateUserProfileRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        fullName:
+          type: string
+          minLength: 2
+          maxLength: 150
+          example: "Nguyễn Văn A"
+          description: Họ và tên đầy đủ (2 đến 150 ký tự sau khi trim, không chấp nhận null)
+        phone:
+          type: string
+          pattern: '^0\d{9}$'
+          example: "0912345678"
+          description: Số điện thoại Việt Nam gồm 10 chữ số bắt đầu bằng 0 (không chấp nhận null)
+        dateOfBirth:
+          type:
+            - string
+            - "null"
+          format: date
+          pattern: '^\d{4}-\d{2}-\d{2}$'
+          example: "2000-05-15"
+          description: Ngày sinh hợp lệ định dạng YYYY-MM-DD, từ 1900-01-01 trở đi và đủ 16 tuổi (truyền null để xóa)
+        address:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 500
+          example: "123 Võ Văn Ngân, TP. Thủ Đức, TP.HCM"
+          description: Địa chỉ liên hệ (1 đến 500 ký tự sau khi trim, không chấp nhận chuỗi rỗng/toàn khoảng trắng, truyền null để xóa)
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu đầu vào không hợp lệ"
+        traceId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Dữ liệu đầu vào không hợp lệ, thiếu trường cập nhật hoặc chứa trường bị cấm/không xác định
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+            errors:
+              dateOfBirth: ["Người dùng phải đủ 16 tuổi trở lên"]
+
+    UnauthorizedError:
+      description: Thiếu access token hoặc token/tài khoản không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    ForbiddenError:
+      description: Tài khoản bị khóa hoặc chưa kích hoạt
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "ACCOUNT_LOCKED"
+            message: "Tài khoản đã bị khóa hoặc chưa kích hoạt"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    PhoneConflictError:
+      description: Số điện thoại mới đã được tài khoản khác sử dụng
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "PHONE_ALREADY_EXISTS"
+            message: "Số điện thoại đã được sử dụng"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    InternalError:
+      description: Lỗi hệ thống nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
