@@ -39,3 +39,18 @@ export interface UpdateUserAvatarInput {
   avatarUrl: string;
   avatarCloudinaryPublicId: string;
 }
+
+export interface UserPasswordContextRecord {
+  id: string;
+  accountStatus: string;
+  passwordHash: string;
+}
+
+export interface ChangePasswordInput {
+  currentPassword: string;
+  newPassword: string;
+}
+
+export interface ChangePasswordResponseDTO {
+  message: string;
+}

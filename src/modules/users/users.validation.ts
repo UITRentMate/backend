@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ApiError } from '../../common/errors/api-error';
-import type { UpdateUserProfileInput } from './users.types';
+import { passwordSchema } from '../auth/auth.validation';
+import type { ChangePasswordInput, UpdateUserProfileInput } from './users.types';
 
 export const PHONE_REGEX = /^0\d{9}$/;
 export const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -126,4 +127,36 @@ function parseZod<T>(schema: z.ZodType<T>, body: unknown): T {
  */
 export function validateUpdateUserProfile(body: unknown): UpdateUserProfileInput {
   return parseZod(updateUserProfileSchema, body);
+}
+
+const changePasswordSchema = z
+  .object({
+    currentPassword: z
+      .string({ error: 'Mật khẩu hiện tại phải là chuỗi ký tự' })
+      .min(1, 'Vui lòng nhập mật khẩu hiện tại')
+      .refine(
+        (value) => Buffer.byteLength(value, 'utf8') <= 72,
+        'Mật khẩu hiện tại không được vượt 72 byte UTF-8',
+      ),
+    newPassword: passwordSchema,
+    confirmNewPassword: z
+      .string({ error: 'Mật khẩu xác nhận phải là chuỗi ký tự' })
+      .min(1, 'Vui lòng nhập mật khẩu xác nhận'),
+  })
+  .strict()
+  .refine((input) => input.newPassword === input.confirmNewPassword, {
+    path: ['confirmNewPassword'],
+    message: 'Mật khẩu xác nhận không khớp',
+  })
+  .refine((input) => input.newPassword !== input.currentPassword, {
+    path: ['newPassword'],
+    message: 'Mật khẩu mới không được trùng với mật khẩu hiện tại',
+  });
+
+/**
+ * Validate payload đổi mật khẩu cá nhân (PATCH /api/v1/users/me/password)
+ */
+export function validateChangePassword(body: unknown): ChangePasswordInput {
+  const { currentPassword, newPassword } = parseZod(changePasswordSchema, body);
+  return { currentPassword, newPassword };
 }

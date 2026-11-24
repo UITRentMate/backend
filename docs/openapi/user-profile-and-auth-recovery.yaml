@@ -3,8 +3,8 @@ info:
   title: RentMate — User Profile & Auth Recovery API Specification
   version: 1.0.0
   description: |
-    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Hồ sơ cá nhân người dùng (BE-P3-01 Phần 1 & Phần 2)**.
-    Bao gồm các endpoint xem thông tin hồ sơ cá nhân (`GET /api/v1/users/me`), cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`), và tải lên/thay đổi ảnh đại diện (`POST /api/v1/users/me/avatar`).
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Hồ sơ cá nhân người dùng (BE-P3-01 Phần 1, Phần 2 & Phần 3)**.
+    Bao gồm các endpoint xem thông tin hồ sơ cá nhân (`GET /api/v1/users/me`), cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`), tải lên/thay đổi ảnh đại diện (`POST /api/v1/users/me/avatar`), và đổi mật khẩu cá nhân (`PATCH /api/v1/users/me/password`).
   contact:
     name: RentMate Engineering Team (SE100 - Nhóm 15)
   license:
@@ -28,7 +28,7 @@ paths:
         Trả về đầy đủ thông tin hồ sơ của người dùng đang đăng nhập (`ACTIVE`) qua JWT Bearer token.
         Giữ tương thích ngược 100% với 6 trường cơ bản (`userId`, `fullName`, `email`, `phone`, `role`, `status`) và bổ sung `avatarUrl`, `dateOfBirth`, `address`.
         Tuyệt đối không bao giờ trả về `passwordHash` hoặc `avatarCloudinaryPublicId`.
-      operationId: getMyProfile
+      operationId: getCurrentUser
       security:
         - BearerAuth: []
       responses:
@@ -135,7 +135,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/UserProfileResponse'
         '400':
-          $ref: '#/components/responses/FileRequiredError'
+          $ref: '#/components/responses/AvatarUploadBadRequestError'
         '401':
           $ref: '#/components/responses/UnauthorizedError'
         '403':
@@ -144,6 +144,52 @@ paths:
           $ref: '#/components/responses/FileTooLargeError'
         '415':
           $ref: '#/components/responses/UnsupportedMediaTypeError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/users/me/password:
+    patch:
+      tags:
+        - User Profile
+      summary: Đổi mật khẩu tài khoản hiện tại
+      description: |
+        Đổi mật khẩu cho người dùng đang đăng nhập (`ACTIVE`) qua JWT Bearer token.
+        - Xác thực `currentPassword` bằng bcrypt; nếu sai trả về `400 INVALID_CURRENT_PASSWORD`.
+        - Kiểm tra độ mạnh `newPassword` (8 đến 72 byte UTF-8, chữ hoa, chữ thường, chữ số và ký tự đặc biệt), `newPassword === confirmNewPassword`, và `newPassword !== currentPassword`.
+        - Băm mật khẩu mới với bcrypt cost 12, cập nhật `passwordHash`, thu hồi toàn bộ `RefreshSession` đang hoạt động và ghi `AuditLog` (`PASSWORD_CHANGED`) nguyên tử trong cùng transaction.
+        - Xóa cookie `refreshToken` (`Max-Age=0`, `Path=/api/v1/auth`) khi thành công để buộc đăng nhập lại.
+      operationId: changeMyPassword
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+            example:
+              currentPassword: "OldPassword@123"
+              newPassword: "NewPassword@456"
+              confirmNewPassword: "NewPassword@456"
+      responses:
+        '200':
+          description: Đổi mật khẩu thành công và đã thu hồi toàn bộ phiên refresh
+          headers:
+            Set-Cookie:
+              description: Xóa HttpOnly cookie `refreshToken` với `Max-Age=0` và `Path=/api/v1/auth`
+              schema:
+                type: string
+                example: "refreshToken=; Max-Age=0; Path=/api/v1/auth; HttpOnly; SameSite=Lax"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangePasswordResponse'
+        '400':
+          $ref: '#/components/responses/ChangePasswordBadRequestError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -243,6 +289,44 @@ components:
           example: "123 Võ Văn Ngân, TP. Thủ Đức, TP.HCM"
           description: Địa chỉ liên hệ (1 đến 500 ký tự sau khi trim, không chấp nhận chuỗi rỗng/toàn khoảng trắng, truyền null để xóa)
 
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - currentPassword
+        - newPassword
+        - confirmNewPassword
+      properties:
+        currentPassword:
+          type: string
+          minLength: 1
+          maxLength: 72
+          format: password
+          example: "OldPassword@123"
+          description: Mật khẩu hiện tại (tối đa 72 byte UTF-8)
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 72
+          format: password
+          example: "NewPassword@456"
+          description: Mật khẩu mới (8 đến 72 byte UTF-8, gồm chữ hoa, chữ thường, chữ số và ký tự đặc biệt; phải khác mật khẩu hiện tại)
+        confirmNewPassword:
+          type: string
+          minLength: 1
+          format: password
+          example: "NewPassword@456"
+          description: Nhập lại mật khẩu mới (phải khớp với `newPassword`)
+
+    ChangePasswordResponse:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+          example: "Đổi mật khẩu thành công. Vui lòng đăng nhập lại"
+
     ApiErrorResponse:
       type: object
       required:
@@ -286,6 +370,31 @@ components:
             errors:
               dateOfBirth: ["Người dùng phải đủ 16 tuổi trở lên"]
 
+    ChangePasswordBadRequestError:
+      description: Dữ liệu đổi mật khẩu không hợp lệ (`VALIDATION_ERROR`) hoặc mật khẩu hiện tại không đúng (`INVALID_CURRENT_PASSWORD`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            validationError:
+              summary: Lỗi kiểm tra dữ liệu đầu vào (mật khẩu yếu, không khớp hoặc trùng mật khẩu cũ)
+              value:
+                success: false
+                code: "VALIDATION_ERROR"
+                message: "Dữ liệu đầu vào không hợp lệ"
+                traceId: "550e8400-e29b-41d4-a716-446655440000"
+                errors:
+                  newPassword: ["Mật khẩu mới không được trùng với mật khẩu hiện tại"]
+                  confirmNewPassword: ["Mật khẩu xác nhận không khớp"]
+            invalidCurrentPassword:
+              summary: Mật khẩu hiện tại không chính xác
+              value:
+                success: false
+                code: "INVALID_CURRENT_PASSWORD"
+                message: "Mật khẩu hiện tại không đúng"
+                traceId: "550e8400-e29b-41d4-a716-446655440000"
+
     UnauthorizedError:
       description: Thiếu access token hoặc token/tài khoản không hợp lệ
       content:
@@ -322,17 +431,27 @@ components:
             message: "Số điện thoại đã được sử dụng"
             traceId: "550e8400-e29b-41d4-a716-446655440000"
 
-    FileRequiredError:
-      description: Thiếu file ảnh trong request multipart/form-data
+    AvatarUploadBadRequestError:
+      description: Thiếu file ảnh (`FILE_REQUIRED`) hoặc request upload multipart không hợp lệ như sai tên trường khác `avatar` hay lỗi Multer (`INVALID_FILE_UPLOAD`)
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/ApiErrorResponse'
-          example:
-            success: false
-            code: "FILE_REQUIRED"
-            message: "Vui lòng chọn file ảnh để tải lên"
-            traceId: "550e8400-e29b-41d4-a716-446655440000"
+          examples:
+            fileRequired:
+              summary: Thiếu file ảnh trong request multipart/form-data
+              value:
+                success: false
+                code: "FILE_REQUIRED"
+                message: "Vui lòng chọn file ảnh để tải lên"
+                traceId: "550e8400-e29b-41d4-a716-446655440000"
+            invalidFileUpload:
+              summary: Tên trường multipart không hợp lệ (ví dụ gửi `file` thay vì `avatar`) hoặc lỗi Multer khác
+              value:
+                success: false
+                code: "INVALID_FILE_UPLOAD"
+                message: "Unexpected field"
+                traceId: "550e8400-e29b-41d4-a716-446655440000"
 
     FileTooLargeError:
       description: Dung lượng file ảnh vượt quá giới hạn tối đa 5MB

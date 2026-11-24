@@ -3,6 +3,7 @@ import { requireAuth } from '../../common/require-auth';
 import { requireActiveUser } from '../../common/middleware/require-role';
 import { uploadSingleImage } from '../media/media.middleware';
 import {
+  changePasswordController,
   getMeController,
   updateMeController,
   uploadAvatarController,
@@ -19,3 +20,4 @@ usersRoutes.post(
   uploadSingleImage('avatar'),
   uploadAvatarController,
 );
+usersRoutes.patch('/me/password', requireAuth, requireActiveUser, changePasswordController);

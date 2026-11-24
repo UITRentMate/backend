@@ -5,7 +5,7 @@ import { prisma } from '../../infrastructure/database/prisma';
 import { ACCESS_TTL_SECONDS, assertJwtConfigured, hashRefreshToken, newRefreshToken, REFRESH_TTL_SECONDS, signAccessToken } from './auth.security';
 import type { parseLogin, parseRegister } from './auth.validation';
 
-const BCRYPT_ROUNDS = 12;
+export const BCRYPT_ROUNDS = 12;
 
 async function withSerializableRetry<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   for (let attempt = 0; attempt < 3; attempt++) {

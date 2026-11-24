@@ -325,6 +325,24 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
     assert.equal(body.code, 'FILE_REQUIRED');
   });
 
+  test("returns 400 INVALID_FILE_UPLOAD when file is sent under wrong multipart field name 'file'", async () => {
+    stub(prisma.user, 'findUnique', async () => baseUser);
+
+    const formData = new FormData();
+    formData.append('file', new Blob([VALID_JPEG_BUFFER], { type: 'image/jpeg' }), 'avatar.jpg');
+
+    const { response, body } = await request('/api/v1/users/me/avatar', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${signAccessToken(baseUser.id)}`,
+      },
+      body: formData,
+    });
+
+    assert.equal(response.status, 400);
+    assert.equal(body.code, 'INVALID_FILE_UPLOAD');
+  });
+
   test('returns 413 FILE_TOO_LARGE when file exceeds 5MB', async () => {
     stub(prisma.user, 'findUnique', async () => baseUser);
 
@@ -519,7 +537,7 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
     assert.deepEqual(deletedPublicIds, ['rentmate/avatars/rollback-id']);
   });
 
-  test('returns 200 OK even when best-effort old avatar deletion returns false or throws', async () => {
+  test('returns 200 OK even when best-effort old avatar deletion returns false', async () => {
     stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       role: baseUser.role,

@@ -1,8 +1,16 @@
+import bcrypt from 'bcrypt';
 import { ApiError } from '../../common/errors/api-error';
 import { buildUserAvatarPublicId } from '../../common/utils/cloudinary.util';
+import { BCRYPT_ROUNDS } from '../auth/auth.service';
 import { mediaService } from '../media/media.service';
 import { UsersRepository } from './users.repository';
-import type { UpdateUserProfileInput, UserProfileDTO, UserProfileRecord } from './users.types';
+import type {
+  ChangePasswordInput,
+  ChangePasswordResponseDTO,
+  UpdateUserProfileInput,
+  UserProfileDTO,
+  UserProfileRecord,
+} from './users.types';
 
 function formatDateOnly(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
@@ -161,4 +169,44 @@ export async function uploadMyAvatar(
   }
 
   return toUserProfileDTO(updated);
+}
+
+/**
+ * Đổi mật khẩu cho người dùng hiện tại, thu hồi toàn bộ refresh session và ghi audit log.
+ */
+export async function changeMyPassword(
+  userId: string,
+  input: ChangePasswordInput,
+): Promise<ChangePasswordResponseDTO> {
+  const user = await UsersRepository.findPasswordContextById(userId);
+  assertActiveUser(user);
+
+  const isCurrentPasswordValid = await bcrypt.compare(input.currentPassword, user.passwordHash);
+  if (!isCurrentPasswordValid) {
+    throw new ApiError(400, 'INVALID_CURRENT_PASSWORD', 'Mật khẩu hiện tại không đúng');
+  }
+
+  const isSameAsCurrent = await bcrypt.compare(input.newPassword, user.passwordHash);
+  if (isSameAsCurrent) {
+    throw new ApiError(400, 'VALIDATION_ERROR', 'Dữ liệu đầu vào không hợp lệ', {
+      newPassword: ['Mật khẩu mới không được trùng với mật khẩu hiện tại'],
+    });
+  }
+
+  const newHash = await bcrypt.hash(input.newPassword, BCRYPT_ROUNDS);
+
+  try {
+    await UsersRepository.changePasswordAndRevokeSessions(userId, newHash);
+  } catch (error) {
+    if (isRecordNotFoundError(error)) {
+      throw new ApiError(
+        401,
+        'UNAUTHORIZED',
+        'Tài khoản không tồn tại hoặc phiên đăng nhập không hợp lệ',
+      );
+    }
+    throw error;
+  }
+
+  return { message: 'Đổi mật khẩu thành công. Vui lòng đăng nhập lại' };
 }

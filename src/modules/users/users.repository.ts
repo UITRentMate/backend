@@ -1,9 +1,11 @@
 import type { Prisma } from '@prisma/client';
+import { recordAuditLog } from '../../common/utils/audit-log.util';
 import { prisma } from '../../infrastructure/database/prisma';
 import type {
   UpdateUserAvatarInput,
   UpdateUserProfileInput,
   UserAvatarContextRecord,
+  UserPasswordContextRecord,
   UserProfileRecord,
 } from './users.types';
 
@@ -29,6 +31,15 @@ export const USER_AVATAR_CONTEXT_SELECT = {
   id: true,
   accountStatus: true,
   avatarCloudinaryPublicId: true,
+} satisfies Prisma.UserSelect;
+
+/**
+ * Select nội bộ chỉ dùng khi đổi mật khẩu; tuyệt đối không trả passwordHash ra ngoài DTO.
+ */
+export const USER_PASSWORD_CONTEXT_SELECT = {
+  id: true,
+  accountStatus: true,
+  passwordHash: true,
 } satisfies Prisma.UserSelect;
 
 export class UsersRepository {
@@ -89,6 +100,48 @@ export class UsersRepository {
         avatarCloudinaryPublicId: input.avatarCloudinaryPublicId,
       },
       select: USER_PROFILE_SELECT,
+    });
+  }
+
+  /**
+   * Lấy thông tin nội bộ phục vụ xác thực và đổi mật khẩu (bao gồm passwordHash)
+   */
+  public static async findPasswordContextById(
+    userId: string,
+  ): Promise<UserPasswordContextRecord | null> {
+    return prisma.user.findUnique({
+      where: { id: userId },
+      select: USER_PASSWORD_CONTEXT_SELECT,
+    });
+  }
+
+  /**
+   * Cập nhật mật khẩu mới, thu hồi toàn bộ refresh session đang hoạt động và ghi audit log nguyên tử.
+   */
+  public static async changePasswordAndRevokeSessions(
+    userId: string,
+    newPasswordHash: string,
+  ): Promise<void> {
+    await prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: userId },
+        data: { passwordHash: newPasswordHash },
+        select: { id: true },
+      });
+
+      await tx.refreshSession.updateMany({
+        where: { userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      });
+
+      await recordAuditLog(tx, {
+        actorId: userId,
+        entityType: 'User',
+        entityId: userId,
+        action: 'PASSWORD_CHANGED',
+        oldData: null,
+        newData: { sessionsRevoked: true },
+      });
     });
   }
 }
