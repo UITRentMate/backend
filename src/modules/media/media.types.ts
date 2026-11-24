@@ -1,7 +1,15 @@
+export interface UploadTransformationOptions {
+  width?: number;
+  height?: number;
+  crop?: string;
+  gravity?: string;
+  [key: string]: any;
+}
+
 export interface UploadStreamOptions {
   publicId: string;
   folder?: string;
-  transformation?: Record<string, any>;
+  transformation?: UploadTransformationOptions;
 }
 
 export interface UploadResult {

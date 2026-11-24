@@ -28,3 +28,14 @@ export interface UpdateUserProfileInput {
   dateOfBirth?: Date | null;
   address?: string | null;
 }
+
+export interface UserAvatarContextRecord {
+  id: string;
+  accountStatus: string;
+  avatarCloudinaryPublicId: string | null;
+}
+
+export interface UpdateUserAvatarInput {
+  avatarUrl: string;
+  avatarCloudinaryPublicId: string;
+}

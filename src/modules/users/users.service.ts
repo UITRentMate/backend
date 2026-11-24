@@ -1,4 +1,6 @@
 import { ApiError } from '../../common/errors/api-error';
+import { buildUserAvatarPublicId } from '../../common/utils/cloudinary.util';
+import { mediaService } from '../media/media.service';
 import { UsersRepository } from './users.repository';
 import type { UpdateUserProfileInput, UserProfileDTO, UserProfileRecord } from './users.types';
 
@@ -28,9 +30,9 @@ function toUserProfileDTO(user: UserProfileRecord): UserProfileDTO {
   };
 }
 
-function assertActiveUserRecord(
-  user: UserProfileRecord | null,
-): asserts user is UserProfileRecord {
+function assertActiveUser<T extends { accountStatus: string }>(
+  user: T | null,
+): asserts user is T {
   if (!user) {
     throw new ApiError(
       401,
@@ -64,7 +66,7 @@ function isRecordNotFoundError(error: unknown): boolean {
  */
 export async function getCurrentUser(userId: string): Promise<UserProfileDTO> {
   const user = await UsersRepository.findProfileById(userId);
-  assertActiveUserRecord(user);
+  assertActiveUser(user);
   return toUserProfileDTO(user);
 }
 
@@ -76,7 +78,7 @@ export async function updateCurrentUser(
   input: UpdateUserProfileInput,
 ): Promise<UserProfileDTO> {
   const existing = await UsersRepository.findProfileById(userId);
-  assertActiveUserRecord(existing);
+  assertActiveUser(existing);
 
   try {
     const updated = await UsersRepository.updateProfileById(userId, input);
@@ -94,4 +96,69 @@ export async function updateCurrentUser(
     }
     throw error;
   }
+}
+
+/**
+ * Tải lên và cập nhật ảnh đại diện cho người dùng hiện tại (512x512 face-crop).
+ * Rollback xóa ảnh mới trên Cloudinary nếu cập nhật DB thất bại; dọn ảnh cũ best-effort sau khi DB thành công.
+ */
+export async function uploadMyAvatar(
+  userId: string,
+  fileBuffer: Buffer,
+): Promise<UserProfileDTO> {
+  const existing = await UsersRepository.findAvatarContextById(userId);
+  assertActiveUser(existing);
+
+  const publicId = buildUserAvatarPublicId(userId);
+  const uploadResult = await mediaService.uploadStream(fileBuffer, {
+    publicId,
+    transformation: {
+      width: 512,
+      height: 512,
+      crop: 'fill',
+      gravity: 'face',
+    },
+  });
+
+  let updated: UserProfileRecord;
+  try {
+    updated = await UsersRepository.updateAvatarById(userId, {
+      avatarUrl: uploadResult.secureUrl,
+      avatarCloudinaryPublicId: uploadResult.publicId,
+    });
+  } catch (error) {
+    // Bù trừ lỗi: Xóa ảnh vừa upload trên Cloudinary nếu cập nhật DB thất bại
+    try {
+      await mediaService.deleteResource(uploadResult.publicId);
+    } catch (rollbackError) {
+      console.warn(
+        `[UsersService] Failed to rollback newly uploaded avatar ${uploadResult.publicId}:`,
+        rollbackError,
+      );
+    }
+
+    if (isRecordNotFoundError(error)) {
+      throw new ApiError(
+        401,
+        'UNAUTHORIZED',
+        'Tài khoản không tồn tại hoặc phiên đăng nhập không hợp lệ',
+      );
+    }
+    throw error;
+  }
+
+  // Dọn dẹp ảnh đại diện cũ best-effort, không làm hỏng request nếu xóa thất bại
+  const oldPublicId = existing.avatarCloudinaryPublicId;
+  if (oldPublicId && oldPublicId !== uploadResult.publicId) {
+    try {
+      const deleted = await mediaService.deleteResource(oldPublicId);
+      if (!deleted) {
+        console.warn(`[UsersService] Failed to cleanup old avatar ${oldPublicId}`);
+      }
+    } catch (cleanupError) {
+      console.warn(`[UsersService] Failed to cleanup old avatar ${oldPublicId}:`, cleanupError);
+    }
+  }
+
+  return toUserProfileDTO(updated);
 }

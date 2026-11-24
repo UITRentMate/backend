@@ -63,6 +63,13 @@ export function buildPropertyCoverPublicId(propertyId: string): string {
 }
 
 /**
+ * Tạo public_id cho ảnh đại diện người dùng
+ */
+export function buildUserAvatarPublicId(userId: string): string {
+  return `rentmate/avatars/${userId}/avatar_${Date.now()}`;
+}
+
+/**
  * Tạo public_id cho ảnh phòng trọ
  */
 export function buildRoomImagePublicId(roomId: string, imageId: string): string {

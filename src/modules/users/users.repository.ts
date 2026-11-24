@@ -1,6 +1,11 @@
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import type { UpdateUserProfileInput, UserProfileRecord } from './users.types';
+import type {
+  UpdateUserAvatarInput,
+  UpdateUserProfileInput,
+  UserAvatarContextRecord,
+  UserProfileRecord,
+} from './users.types';
 
 /**
  * Chỉ chọn các trường hồ sơ công khai; tuyệt đối không truy vấn passwordHash hay avatarCloudinaryPublicId.
@@ -17,6 +22,15 @@ export const USER_PROFILE_SELECT = {
   address: true,
 } satisfies Prisma.UserSelect;
 
+/**
+ * Select nội bộ chỉ dùng khi cập nhật avatar để lấy avatarCloudinaryPublicId cũ phục vụ dọn dẹp Cloudinary.
+ */
+export const USER_AVATAR_CONTEXT_SELECT = {
+  id: true,
+  accountStatus: true,
+  avatarCloudinaryPublicId: true,
+} satisfies Prisma.UserSelect;
+
 export class UsersRepository {
   /**
    * Lấy thông tin hồ sơ người dùng theo ID
@@ -25,6 +39,18 @@ export class UsersRepository {
     return prisma.user.findUnique({
       where: { id: userId },
       select: USER_PROFILE_SELECT,
+    });
+  }
+
+  /**
+   * Lấy thông tin nội bộ phục vụ thay thế avatar (bao gồm avatarCloudinaryPublicId cũ)
+   */
+  public static async findAvatarContextById(
+    userId: string,
+  ): Promise<UserAvatarContextRecord | null> {
+    return prisma.user.findUnique({
+      where: { id: userId },
+      select: USER_AVATAR_CONTEXT_SELECT,
     });
   }
 
@@ -45,6 +71,23 @@ export class UsersRepository {
     return prisma.user.update({
       where: { id: userId },
       data,
+      select: USER_PROFILE_SELECT,
+    });
+  }
+
+  /**
+   * Cập nhật avatarUrl và avatarCloudinaryPublicId mới, trả về hồ sơ công khai an toàn
+   */
+  public static async updateAvatarById(
+    userId: string,
+    input: UpdateUserAvatarInput,
+  ): Promise<UserProfileRecord> {
+    return prisma.user.update({
+      where: { id: userId },
+      data: {
+        avatarUrl: input.avatarUrl,
+        avatarCloudinaryPublicId: input.avatarCloudinaryPublicId,
+      },
       select: USER_PROFILE_SELECT,
     });
   }

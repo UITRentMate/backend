@@ -3,8 +3,8 @@ info:
   title: RentMate — User Profile & Auth Recovery API Specification
   version: 1.0.0
   description: |
-    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Hồ sơ cá nhân người dùng (BE-P3-01 Phần 1)**.
-    Bao gồm các endpoint xem thông tin hồ sơ cá nhân (`GET /api/v1/users/me`) và cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`).
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Hồ sơ cá nhân người dùng (BE-P3-01 Phần 1 & Phần 2)**.
+    Bao gồm các endpoint xem thông tin hồ sơ cá nhân (`GET /api/v1/users/me`), cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`), và tải lên/thay đổi ảnh đại diện (`POST /api/v1/users/me/avatar`).
   contact:
     name: RentMate Engineering Team (SE100 - Nhóm 15)
   license:
@@ -97,6 +97,53 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '409':
           $ref: '#/components/responses/PhoneConflictError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/users/me/avatar:
+    post:
+      tags:
+        - User Profile
+      summary: Tải lên hoặc thay đổi ảnh đại diện
+      description: |
+        Tải lên ảnh đại diện mới cho người dùng đang đăng nhập (`ACTIVE`) qua `multipart/form-data` với tên trường `avatar`.
+        - Giới hạn kích thước tối đa 5MB (`413 FILE_TOO_LARGE`).
+        - Chỉ hỗ trợ định dạng JPEG, PNG hoặc WebP; xác thực cả MIME type và Magic Bytes nhị phân (`415 UNSUPPORTED_MEDIA_TYPE`).
+        - Ảnh được chuẩn hóa kích thước `512x512` (`crop: fill`, `gravity: face`) trên Cloudinary tại `rentmate/avatars/{userId}/avatar_{timestamp}`.
+        - Nếu cập nhật DB thất bại, ảnh vừa tải lên sẽ được xóa bù trừ trên Cloudinary. Ảnh đại diện cũ (nếu có) sẽ được dọn dẹp best-effort sau khi DB cập nhật thành công.
+      operationId: uploadMyAvatar
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - avatar
+              properties:
+                avatar:
+                  type: string
+                  format: binary
+                  description: File ảnh đại diện (JPEG, PNG hoặc WebP, tối đa 5MB)
+      responses:
+        '200':
+          description: Tải lên ảnh đại diện thành công, trả về hồ sơ người dùng đầy đủ
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '400':
+          $ref: '#/components/responses/FileRequiredError'
+        '401':
+          $ref: '#/components/responses/UnauthorizedError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '413':
+          $ref: '#/components/responses/FileTooLargeError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaTypeError'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -273,6 +320,42 @@ components:
             success: false
             code: "PHONE_ALREADY_EXISTS"
             message: "Số điện thoại đã được sử dụng"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    FileRequiredError:
+      description: Thiếu file ảnh trong request multipart/form-data
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FILE_REQUIRED"
+            message: "Vui lòng chọn file ảnh để tải lên"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    FileTooLargeError:
+      description: Dung lượng file ảnh vượt quá giới hạn tối đa 5MB
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FILE_TOO_LARGE"
+            message: "Dung lượng file ảnh vượt quá giới hạn tối đa 5MB"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+
+    UnsupportedMediaTypeError:
+      description: Định dạng MIME hoặc nội dung nhị phân (Magic Bytes) của file không phải JPEG, PNG hoặc WebP
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNSUPPORTED_MEDIA_TYPE"
+            message: "Chỉ hỗ trợ file ảnh định dạng JPEG, PNG hoặc WebP"
             traceId: "550e8400-e29b-41d4-a716-446655440000"
 
     InternalError:

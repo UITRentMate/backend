@@ -4,6 +4,7 @@ import {
   extractCloudinaryPublicId,
   buildPropertyCoverPublicId,
   buildRoomImagePublicId,
+  buildUserAvatarPublicId,
   validateImageBufferMagicBytes,
   validateUploadedImageFile,
 } from '../../src/common/utils/cloudinary.util';
@@ -34,6 +35,11 @@ describe('Cloudinary Utilities', () => {
   test('buildRoomImagePublicId creates structured path with room and image ids', () => {
     const publicId = buildRoomImagePublicId('room-123', 'img-456');
     assert.equal(publicId, 'rentmate/rooms/room-123/img-456');
+  });
+
+  test('buildUserAvatarPublicId creates structured path with user id prefix', () => {
+    const publicId = buildUserAvatarPublicId('user-123');
+    assert.match(publicId, /^rentmate\/avatars\/user-123\/avatar_\d+$/);
   });
 
   test('validateImageBufferMagicBytes detects valid JPEG, PNG, WEBP', () => {
