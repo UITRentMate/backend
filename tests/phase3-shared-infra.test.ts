@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 
+import { Prisma } from '@prisma/client';
 import {
   CONTRACT_STATUS,
   DEPOSIT_RECEIPT_STATUS,
+  getEventTypesByCategory,
+  getNotificationCategory,
   LANDLORD_APPLICATION_STATUS,
+  NOTIFICATION_CATEGORY,
+  NOTIFICATION_CATEGORY_BY_EVENT,
   NOTIFICATION_EVENT_TYPE,
   REPAIR_ATTACHMENT_STAGE,
   REPAIR_COST_BEARER,
@@ -12,6 +17,11 @@ import {
   REPAIR_TICKET_STATUS,
   RESIDENT_INVITATION_STATUS,
 } from '../src/common/constants/phase3-status';
+import {
+  createNotification,
+  createNotificationsBatch,
+  normalizeNotificationTitle,
+} from '../src/common/utils/notification.util';
 import {
   buildPasswordResetEmailContent,
   loadSmtpConfigFromEnv,
@@ -53,6 +63,10 @@ describe('Phase 3 Shared Status Constants', () => {
     }
     for (const val of Object.values(NOTIFICATION_EVENT_TYPE)) {
       assert.ok(val.length <= 40, `NOTIFICATION_EVENT_TYPE "${val}" vượt quá VARCHAR(40)`);
+      assert.ok(
+        val in NOTIFICATION_CATEGORY_BY_EVENT,
+        `NOTIFICATION_EVENT_TYPE "${val}" chưa được ánh xạ trong NOTIFICATION_CATEGORY_BY_EVENT`,
+      );
     }
   });
 
@@ -76,6 +90,89 @@ describe('Phase 3 Shared Status Constants', () => {
     for (const eventType of residentEvents) {
       assert.ok(eventType.length <= 40, `${eventType} vượt quá VARCHAR(40)`);
     }
+  });
+
+  test('ánh xạ danh mục thông báo (category) & chuẩn hóa tiêu đề hoạt động chính xác', () => {
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED),
+      NOTIFICATION_CATEGORY.FINANCE,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CREATED),
+      NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_REJECTED),
+      NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_CANCELLED),
+      NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.REPAIR_TICKET_CREATED),
+      NOTIFICATION_CATEGORY.REPAIR,
+    );
+    assert.equal(
+      getNotificationCategory('UNKNOWN_FUTURE_EVENT'),
+      NOTIFICATION_CATEGORY.SYSTEM,
+    );
+
+    const repairEvents = getEventTypesByCategory(NOTIFICATION_CATEGORY.REPAIR);
+    assert.ok(repairEvents.includes(NOTIFICATION_EVENT_TYPE.REPAIR_TICKET_CREATED));
+    assert.ok(!repairEvents.includes(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED));
+
+    const longTitle = `  ${'A'.repeat(250)}  `;
+    assert.equal(normalizeNotificationTitle(longTitle).length, 200);
+    assert.equal(normalizeNotificationTitle('  Thông báo mới  '), 'Thông báo mới');
+
+    // Emoji nằm đúng ranh giới 200 UTF-16 code units không được tách đôi surrogate pair
+    const titleWithBoundaryEmoji = `${'A'.repeat(199)}🏠BC`;
+    const normalizedEmojiTitle = normalizeNotificationTitle(titleWithBoundaryEmoji);
+    assert.equal([...normalizedEmojiTitle].length, 200);
+    assert.ok(normalizedEmojiTitle.endsWith('🏠'));
+    assert.equal(Buffer.from(normalizedEmojiTitle, 'utf8').toString('utf8'), normalizedEmojiTitle);
+  });
+
+  test('createNotification và createNotificationsBatch chuẩn hóa title và map payload null sang Prisma.JsonNull', async () => {
+    let singleArgs: any;
+    let batchArgs: any;
+    const fakeDb: any = {
+      notification: {
+        create: async (args: any) => {
+          singleArgs = args;
+          return { id: 'n-1', ...args.data };
+        },
+        createMany: async (args: any) => {
+          batchArgs = args;
+          return { count: args.data.length };
+        },
+      },
+    };
+
+    const longTitle = `${'X'.repeat(199)}🎉YZ`;
+    await createNotification(fakeDb, {
+      recipientId: 'user-1',
+      title: longTitle,
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: null,
+    });
+
+    assert.equal([...singleArgs.data.title].length, 200);
+    assert.ok(singleArgs.data.title.endsWith('🎉'));
+    assert.equal(singleArgs.data.payload, Prisma.JsonNull);
+
+    await createNotificationsBatch(fakeDb, [
+      {
+        recipientId: 'user-2',
+        title: `  ${'Y'.repeat(210)}  `,
+        eventType: NOTIFICATION_EVENT_TYPE.RENTAL_REQUEST_AUTO_REJECTED,
+        payload: null,
+      },
+    ]);
+
+    assert.equal([...batchArgs.data[0].title].length, 200);
+    assert.equal(batchArgs.data[0].payload, Prisma.JsonNull);
   });
 });
 

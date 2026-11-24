@@ -836,4 +836,136 @@ describe('ResidentService Unit Tests', () => {
       ['RESIDENT_SELF_LEFT', 'RESIDENT_REMOVED', 'RESIDENT_REMOVED'],
     );
   });
+
+  test('removeResident: kiểm tra lại quyền sau lockContractRow -> trả 403 FORBIDDEN và không markResidentLeft nếu đổi sở hữu/tenant', async () => {
+    const capture = stubTransaction();
+    let markLeftCalled = false;
+
+    stubRepo('findContractAccessContext', async () => ({
+      contractId: CONTRACT_ID,
+      status: 'ACTIVE',
+      tenantId: PRIMARY_ID,
+      landlordId: LANDLORD_ID,
+      isPrimaryTenant: false,
+      isLandlord: true,
+      isActiveCoResident: false,
+    }));
+    stubRepo('lockContractRow', async () => true);
+    stubRepo('findContractForMutation', async () =>
+      makeContractMutationRow({
+        room: {
+          id: ROOM_ID,
+          roomCode: 'P.101',
+          maxOccupants: 3,
+          property: {
+            id: PROP_ID,
+            landlordId: OUTSIDER_ID,
+          },
+        },
+      }),
+    );
+    stubRepo('markResidentLeft', async () => {
+      markLeftCalled = true;
+    });
+
+    await assert.rejects(
+      () => ResidentService.removeResident(CONTRACT_ID, CO_RESIDENT_ID, landlordUser),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 403 && err.code === 'FORBIDDEN',
+    );
+
+    assert.equal(markLeftCalled, false);
+    assert.equal(capture.committedCount(), 0);
+  });
+
+  test('removeResident: co-resident tự rời phòng nhưng đã bị gỡ trước khi vào lock (null hoặc leftAt !== null) -> trả 404 CONTRACT_NOT_FOUND', async () => {
+    const capture = stubTransaction();
+    let markLeftCalled = false;
+
+    stubRepo('findContractAccessContext', async () => ({
+      contractId: CONTRACT_ID,
+      status: 'ACTIVE',
+      tenantId: PRIMARY_ID,
+      landlordId: LANDLORD_ID,
+      isPrimaryTenant: false,
+      isLandlord: false,
+      isActiveCoResident: true,
+    }));
+    stubRepo('lockContractRow', async () => true);
+    stubRepo('findContractForMutation', async () => makeContractMutationRow());
+    stubRepo('markResidentLeft', async () => {
+      markLeftCalled = true;
+    });
+
+    // Case 1: findContractResident returns null
+    stubRepo('findContractResident', async () => null);
+    await assert.rejects(
+      () => ResidentService.removeResident(CONTRACT_ID, CO_RESIDENT_ID, coResidentUser),
+      (err: unknown) =>
+        err instanceof ApiError && err.statusCode === 404 && err.code === 'CONTRACT_NOT_FOUND',
+    );
+
+    // Case 2: findContractResident returns record with leftAt !== null
+    stubRepo('findContractResident', async () => ({
+      joinedAt: new Date('2026-11-02T08:00:00.000Z'),
+      leftAt: new Date('2026-11-05T08:00:00.000Z'),
+      user: { id: CO_RESIDENT_ID, fullName: 'Co Resident' },
+    }));
+    await assert.rejects(
+      () => ResidentService.removeResident(CONTRACT_ID, CO_RESIDENT_ID, coResidentUser),
+      (err: unknown) =>
+        err instanceof ApiError && err.statusCode === 404 && err.code === 'CONTRACT_NOT_FOUND',
+    );
+
+    assert.equal(markLeftCalled, false);
+    assert.equal(capture.committedCount(), 0);
+  });
+
+  test('removeResident: đổi vai trò giữa pre-check và sau lock -> removalType trong AuditLog/Notification phản ánh đúng vai trò sau lock', async () => {
+    const capture = stubTransaction();
+
+    // Pre-check thấy actor là Landlord (isLandlord=true, isPrimaryTenant=false)
+    stubRepo('findContractAccessContext', async () => ({
+      contractId: CONTRACT_ID,
+      status: 'ACTIVE',
+      tenantId: PRIMARY_ID,
+      landlordId: LANDLORD_ID,
+      isPrimaryTenant: false,
+      isLandlord: true,
+      isActiveCoResident: false,
+    }));
+    stubRepo('lockContractRow', async () => true);
+    // Sau lock, actor chỉ là Primary Tenant (tenantId = LANDLORD_ID, property.landlordId = OUTSIDER_ID)
+    stubRepo('findContractForMutation', async () =>
+      makeContractMutationRow({
+        tenantId: LANDLORD_ID,
+        room: {
+          id: ROOM_ID,
+          roomCode: 'P.101',
+          maxOccupants: 3,
+          property: {
+            id: PROP_ID,
+            landlordId: OUTSIDER_ID,
+          },
+        },
+      }),
+    );
+    stubRepo('findContractResident', async () => ({
+      joinedAt: new Date('2026-11-02T08:00:00.000Z'),
+      leftAt: null,
+      user: { id: CO_RESIDENT_ID, fullName: 'Co Resident' },
+    }));
+    stubRepo('markResidentLeft', async () => {});
+    stubRepo('countActiveCoResidents', async () => 0);
+
+    const dto = await ResidentService.removeResident(CONTRACT_ID, CO_RESIDENT_ID, landlordUser);
+    assert.equal(dto.removalType, 'REMOVED_BY_PRIMARY_TENANT');
+    assert.equal(capture.committedCount(), 1);
+    assert.equal(capture.auditLogs.length, 1);
+    assert.equal(capture.auditLogs[0].action, 'RESIDENT_REMOVED');
+    assert.equal(capture.auditLogs[0].newData.removalType, 'REMOVED_BY_PRIMARY_TENANT');
+    assert.ok(capture.notifications.length > 0);
+    for (const notification of capture.notifications) {
+      assert.equal(notification.payload.metadata.removalType, 'REMOVED_BY_PRIMARY_TENANT');
+    }
+  });
 });

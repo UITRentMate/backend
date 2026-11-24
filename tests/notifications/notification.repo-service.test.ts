@@ -1,0 +1,363 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, describe, test } from 'node:test';
+
+import {
+  NOTIFICATION_CATEGORY,
+  NOTIFICATION_EVENT_TYPE,
+} from '../../src/common/constants/phase3-status';
+import { ApiError } from '../../src/common/errors/api-error';
+import { createNotification } from '../../src/common/utils/notification.util';
+import { prisma } from '../../src/infrastructure/database/prisma';
+import { NotificationRepository } from '../../src/modules/notifications/notification.repository';
+import { NotificationService } from '../../src/modules/notifications/notification.service';
+
+const undo: Array<() => void> = [];
+afterEach(() => {
+  while (undo.length) {
+    undo.pop()!();
+  }
+});
+
+function stub(delegate: any, name: string, implementation: (...args: any[]) => any) {
+  const original = delegate[name];
+  delegate[name] = implementation;
+  undo.push(() => {
+    delegate[name] = original;
+  });
+}
+
+describe('Notification Repository & Service', () => {
+  test('notification.service.ts không import Prisma Client trực tiếp', () => {
+    const serviceSource = fs.readFileSync(
+      path.resolve(__dirname, '../../src/modules/notifications/notification.service.ts'),
+      'utf8',
+    );
+    assert.ok(!serviceSource.includes('infrastructure/database/prisma'));
+    assert.ok(!serviceSource.includes('@prisma/client'));
+  });
+
+  test('NotificationRepository.findNotificationsList lọc theo recipientId, sort deterministic và kết hợp AND khi cross-filter category + eventType', async () => {
+    let findManyArgs: any;
+    let countArgsList: any[] = [];
+
+    stub(prisma.notification, 'findMany', async (args: any) => {
+      findManyArgs = args;
+      return [];
+    });
+    stub(prisma.notification, 'count', async (args: any) => {
+      countArgsList.push(args);
+      return 0;
+    });
+
+    const userId = '550e8400-e29b-41d4-a716-446655440010';
+    await NotificationRepository.findNotificationsList(userId, {
+      page: 2,
+      limit: 10,
+      isRead: false,
+      category: NOTIFICATION_CATEGORY.FINANCE,
+      eventType: NOTIFICATION_EVENT_TYPE.REPAIR_TICKET_CREATED,
+    });
+
+    assert.equal(findManyArgs.skip, 10);
+    assert.equal(findManyArgs.take, 10);
+    assert.deepEqual(findManyArgs.orderBy, [{ createdAt: 'desc' }, { id: 'desc' }]);
+    assert.equal(findManyArgs.where.recipientId, userId);
+    assert.equal(findManyArgs.where.isRead, false);
+    assert.ok(Array.isArray(findManyArgs.where.AND));
+    assert.equal(findManyArgs.where.AND.length, 2);
+
+    // count thứ 2 là unreadCount toàn cục của user (chỉ lọc recipientId + isRead: false)
+    assert.equal(countArgsList.length, 2);
+    assert.deepEqual(countArgsList[1].where, { recipientId: userId, isRead: false });
+
+    // Lọc category=SYSTEM dùng notIn các nhóm còn lại để khớp fallback getNotificationCategory
+    await NotificationRepository.findNotificationsList(userId, {
+      page: 1,
+      limit: 20,
+      category: NOTIFICATION_CATEGORY.SYSTEM,
+    });
+    assert.ok(Array.isArray(findManyArgs.where.eventType?.notIn));
+    assert.ok(findManyArgs.where.eventType.notIn.includes(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED));
+  });
+
+  test('NotificationService tính totalPages chính xác và ném 404 khi thông báo không thuộc sở hữu', async () => {
+    const userId = '550e8400-e29b-41d4-a716-446655440010';
+    const notifId = '550e8400-e29b-41d4-a716-446655440020';
+
+    stub(NotificationRepository, 'findNotificationsList', async () => ({
+      items: [],
+      total: 0,
+      unreadCount: 3,
+    }));
+
+    const emptyList = await NotificationService.getNotifications(userId, { page: 1, limit: 20 });
+    assert.equal(emptyList.totalPages, 0);
+    assert.equal(emptyList.unreadCount, 3);
+
+    stub(NotificationRepository, 'findByIdAndMarkRead', async () => null);
+    await assert.rejects(
+      () => NotificationService.getNotificationDetail(userId, notifId),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 404 && err.code === 'NOTIFICATION_NOT_FOUND',
+    );
+
+    stub(NotificationRepository, 'markOneAsRead', async () => null);
+    await assert.rejects(
+      () => NotificationService.markAsRead(userId, notifId),
+      (err: unknown) => err instanceof ApiError && err.statusCode === 404 && err.code === 'NOTIFICATION_NOT_FOUND',
+    );
+  });
+
+  test('NotificationService trả object phẳng kèm unreadCount cho detail và markAsRead', async () => {
+    const userId = '550e8400-e29b-41d4-a716-446655440010';
+    const notifId = '550e8400-e29b-41d4-a716-446655440020';
+    const record = {
+      id: notifId,
+      recipientId: userId,
+      title: 'Cập nhật lịch hẹn',
+      eventType: NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CONFIRMED,
+      payload: { content: 'Chủ trọ đã xác nhận.', actionUrl: '/viewing-appointments/1' },
+      isRead: true,
+      createdAt: new Date('2026-11-22T03:00:00.000Z'),
+    };
+
+    stub(NotificationRepository, 'findByIdAndMarkRead', async () => ({
+      notification: record,
+      unreadCount: 2,
+    }));
+
+    const detail = await NotificationService.getNotificationDetail(userId, notifId);
+    assert.equal(detail.id, notifId);
+    assert.equal(detail.category, NOTIFICATION_CATEGORY.BOOKING_CONTRACT);
+    assert.equal(detail.content, 'Chủ trọ đã xác nhận.');
+    assert.equal(detail.isRead, true);
+    assert.equal(detail.unreadCount, 2);
+  });
+
+  test('NotificationRepository.countUnread, markAllAsRead và nhánh idempotency của markOneAsRead', async () => {
+    const userId = '550e8400-e29b-41d4-a716-446655440010';
+    const notifId = '550e8400-e29b-41d4-a716-446655440020';
+
+    stub(prisma.notification, 'count', async (args: any) => {
+      assert.deepEqual(args.where, { recipientId: userId, isRead: false });
+      return 7;
+    });
+    assert.equal(await NotificationRepository.countUnread(userId), 7);
+
+    stub(prisma.notification, 'updateMany', async (args: any) => {
+      assert.deepEqual(args.where, { recipientId: userId, isRead: false });
+      assert.deepEqual(args.data, { isRead: true });
+      return { count: 4 };
+    });
+    assert.deepEqual(await NotificationRepository.markAllAsRead(userId), {
+      updatedCount: 4,
+      unreadCount: 0,
+    });
+
+    // Nhánh 1: isRead === false -> phải mở $transaction và gọi updateMany
+    let updateCalled = 0;
+    let txCalled = 0;
+    stub(prisma, '$transaction', async (work: any) => {
+      txCalled += 1;
+      return work(prisma);
+    });
+    stub(prisma.notification, 'findFirst', async () => ({
+      id: notifId,
+      recipientId: userId,
+      title: 'Test',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: null,
+      isRead: false,
+      createdAt: new Date(),
+    }));
+    stub(prisma.notification, 'updateMany', async () => {
+      updateCalled += 1;
+      return { count: 1 };
+    });
+    stub(prisma.notification, 'count', async () => 0);
+
+    const firstRead = await NotificationRepository.markOneAsRead(userId, notifId);
+    assert.equal(txCalled, 1);
+    assert.equal(updateCalled, 1);
+    assert.equal(firstRead?.notification.isRead, true);
+
+    // Nhánh 2: isRead === true -> read-only fast path, không mở $transaction và không gọi updateMany lại
+    updateCalled = 0;
+    txCalled = 0;
+    stub(prisma.notification, 'findFirst', async () => ({
+      id: notifId,
+      recipientId: userId,
+      title: 'Test',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: null,
+      isRead: true,
+      createdAt: new Date(),
+    }));
+
+    const secondRead = await NotificationRepository.markOneAsRead(userId, notifId);
+    assert.equal(txCalled, 0);
+    assert.equal(updateCalled, 0);
+    assert.equal(secondRead?.notification.isRead, true);
+
+    // Nhánh 3: không tìm thấy -> trả null ngay, không mở $transaction
+    txCalled = 0;
+    stub(prisma.notification, 'findFirst', async () => null);
+    const missing = await NotificationRepository.findByIdAndMarkRead(userId, notifId);
+    assert.equal(missing, null);
+    assert.equal(txCalled, 0);
+  });
+
+  test('createNotification hỗ trợ object có toJSON(), nested toJSON(), bỏ qua thuộc tính toJSON() => undefined và từ chối vòng lặp / class thường', async () => {
+    let capturedData: any;
+    const fakeDb: any = {
+      notification: {
+        create: async (args: any) => {
+          capturedData = args.data;
+          return { id: 'n-tojson', ...args.data };
+        },
+      },
+    };
+
+    class DecimalLike {
+      constructor(private readonly raw: string) {}
+      toJSON() {
+        return this.raw;
+      }
+    }
+
+    class InnerSummary {
+      toJSON() {
+        return {
+          amount: new DecimalLike('2500000.50'),
+          createdAt: new Date('2026-11-24T03:00:00.000Z'),
+        };
+      }
+    }
+
+    class OuterPayload {
+      toJSON() {
+        return {
+          content: 'Hóa đơn mới',
+          summary: new InnerSummary(),
+          omittedField: { toJSON: () => undefined },
+        };
+      }
+    }
+
+    const sharedAmount = new DecimalLike('100000');
+
+    await createNotification(fakeDb, {
+      recipientId: '550e8400-e29b-41d4-a716-446655440010',
+      title: 'Hỗ trợ toJSON',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: new OuterPayload() as unknown as Record<string, never>,
+    });
+
+    assert.deepEqual(capturedData.payload, {
+      content: 'Hóa đơn mới',
+      summary: {
+        amount: '2500000.50',
+        createdAt: '2026-11-24T03:00:00.000Z',
+      },
+    });
+
+    await createNotification(fakeDb, {
+      recipientId: '550e8400-e29b-41d4-a716-446655440010',
+      title: 'Shared toJSON không phải vòng lặp',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: {
+        metadata: {
+          min: sharedAmount as unknown as string,
+          max: sharedAmount as unknown as string,
+          ignored: { toJSON: () => undefined } as unknown as string,
+        },
+      },
+    });
+
+    assert.deepEqual(capturedData.payload, {
+      metadata: {
+        min: '100000',
+        max: '100000',
+      },
+    });
+
+    // toJSON() trả về this hoặc tham chiếu vòng gián tiếp -> TypeError
+    const selfToJson: { toJSON(): unknown } = {
+      toJSON() {
+        return selfToJson;
+      },
+    };
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Vòng lặp toJSON trực tiếp',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: selfToJson as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    const indirectCircular: Record<string, unknown> = {
+      toJSON() {
+        return { nested: indirectCircular };
+      },
+    };
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Vòng lặp toJSON gián tiếp',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: indirectCircular as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    // toJSON() trả về undefined ở root hoặc trong mảng -> TypeError
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Root toJSON undefined',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: { toJSON: () => undefined } as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Array element toJSON undefined',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: [{ toJSON: () => undefined }] as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    // Non-plain objects không có toJSON() vẫn phải ném TypeError
+    class PlainCustomClass {
+      readonly value = 1;
+    }
+    for (const invalidObj of [
+      new PlainCustomClass(),
+      new Map([['a', 1]]),
+      new Set([1, 2]),
+      /abc/,
+    ]) {
+      await assert.rejects(
+        () =>
+          createNotification(fakeDb, {
+            recipientId: '550e8400-e29b-41d4-a716-446655440010',
+            title: 'Non-plain object không có toJSON',
+            eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+            payload: { metadata: { invalidObj } } as unknown as Record<string, never>,
+          }),
+        TypeError,
+      );
+    }
+  });
+});

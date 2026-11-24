@@ -697,13 +697,6 @@ export class ResidentService {
       );
     }
 
-    const removalType: ResidentRemovalType =
-      !context.isPrimaryTenant && !context.isLandlord
-        ? 'SELF_LEAVE'
-        : context.isLandlord
-          ? 'REMOVED_BY_LANDLORD'
-          : 'REMOVED_BY_PRIMARY_TENANT';
-
     const now = new Date();
 
     const result = await prisma.$transaction(
@@ -716,6 +709,17 @@ export class ResidentService {
         const contract = await ResidentRepository.findContractForMutation(tx, contractId);
         if (!contract) {
           throw new ApiError(404, 'CONTRACT_NOT_FOUND', CONTRACT_NOT_FOUND_MESSAGE);
+        }
+
+        const isPrimaryTenant = contract.tenantId === currentUser.id;
+        const isLandlord = contract.room.property.landlordId === currentUser.id;
+
+        if (!isPrimaryTenant && !isLandlord && targetUserId !== currentUser.id) {
+          throw new ApiError(
+            403,
+            'FORBIDDEN',
+            'Bạn chỉ có thể tự rời khỏi danh sách cư trú của chính mình',
+          );
         }
 
         if (targetUserId === contract.tenantId) {
@@ -736,12 +740,23 @@ export class ResidentService {
 
         const resident = await ResidentRepository.findContractResident(tx, contract.id, targetUserId);
         if (!resident || resident.leftAt !== null) {
+          if (!isPrimaryTenant && !isLandlord) {
+            throw new ApiError(404, 'CONTRACT_NOT_FOUND', CONTRACT_NOT_FOUND_MESSAGE);
+          }
+
           throw new ApiError(
             404,
             'RESIDENT_NOT_FOUND',
             'Người dùng không phải là người ở cùng đang cư trú của hợp đồng này',
           );
         }
+
+        const removalType: ResidentRemovalType =
+          !isPrimaryTenant && !isLandlord
+            ? 'SELF_LEAVE'
+            : isLandlord
+              ? 'REMOVED_BY_LANDLORD'
+              : 'REMOVED_BY_PRIMARY_TENANT';
 
         await ResidentRepository.markResidentLeft(tx, contract.id, targetUserId, now);
 
