@@ -78,6 +78,7 @@ test('tenant cannot confirm through the HTTP route', async () => {
 test('viewing cancel returns 409 when a concurrent transition consumed PENDING', async () => {
   stub(prisma.user, 'findUnique', async () => tenant);
   stub(prisma.viewingAppointment, 'findUnique', async () => sampleAppointment);
+  stub(prisma, '$transaction', async (work: any) => work(prisma));
   stub(prisma.viewingAppointment, 'updateMany', async () => ({ count: 0 }));
   const { response, body } = await request(`/api/v1/viewing-appointments/${appointmentId}/cancel`, {
     method: 'PATCH', headers: { ...auth(tenant), 'Content-Type': 'application/json' },

@@ -1,12 +1,12 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../infrastructure/database/prisma';
-import { ApiError } from '../../common/errors/api-error';
 import {
-  DEFAULT_VIEWING_DURATION_MINUTES,
   VIEWING_STATUS,
   type CreateViewingAppointmentInput,
   type ViewingAppointmentListQuery,
 } from './viewing-appointment.types';
+
+export type ViewingAppointmentDbClient = Prisma.TransactionClient | typeof prisma;
 
 export class ViewingAppointmentRepository {
   /**
@@ -17,8 +17,11 @@ export class ViewingAppointmentRepository {
    * 4. Property.status = 'ACTIVE'
    * 5. Property.landlord.accountStatus = 'ACTIVE'
    */
-  public static async validateRoomPublicEligibility(roomId: string) {
-    return prisma.room.findFirst({
+  public static async validateRoomPublicEligibility(
+    roomId: string,
+    client: ViewingAppointmentDbClient = prisma,
+  ) {
+    return client.room.findFirst({
       where: {
         id: roomId,
         occupancyStatus: 'VACANT',
@@ -33,9 +36,11 @@ export class ViewingAppointmentRepository {
       },
       select: {
         id: true,
+        roomCode: true,
         property: {
           select: {
             id: true,
+            name: true,
             landlordId: true,
           },
         },
@@ -46,8 +51,12 @@ export class ViewingAppointmentRepository {
   /**
    * Kiểm tra người thuê đã có lịch hẹn PENDING cho phòng này hay chưa
    */
-  public static async hasPendingAppointmentForRoom(roomId: string, tenantId: string): Promise<boolean> {
-    const count = await prisma.viewingAppointment.count({
+  public static async hasPendingAppointmentForRoom(
+    roomId: string,
+    tenantId: string,
+    client: ViewingAppointmentDbClient = prisma,
+  ): Promise<boolean> {
+    const count = await client.viewingAppointment.count({
       where: {
         roomId,
         tenantId,
@@ -58,46 +67,48 @@ export class ViewingAppointmentRepository {
   }
 
   /**
-   * Tạo ViewingAppointment cùng các ViewingTimeOption trong một transaction
+   * Tạo ViewingAppointment cùng các ViewingTimeOption trong transaction (bắt buộc truyền tx)
    */
   public static async createAppointmentWithSlots(
     tenantId: string,
     contactPhone: string,
     input: CreateViewingAppointmentInput,
+    tx: Prisma.TransactionClient,
   ) {
-    return prisma.$transaction(async (tx) => {
-      const appointment = await tx.viewingAppointment.create({
-        data: {
-          roomId: input.roomId,
-          tenantId,
-          contactPhone,
-          status: VIEWING_STATUS.PENDING,
-          note: input.note ?? null,
-        },
-      });
-
-      const slotCreatePromises = input.proposedSlots.map((slotStr) =>
-        tx.viewingTimeOption.create({
-          data: {
-            appointmentId: appointment.id,
-            proposedBy: tenantId,
-            startAt: new Date(slotStr),
-            isSelected: false,
-          },
-        }),
-      );
-
-      await Promise.all(slotCreatePromises);
-
-      return appointment;
+    const appointment = await tx.viewingAppointment.create({
+      data: {
+        roomId: input.roomId,
+        tenantId,
+        contactPhone,
+        status: VIEWING_STATUS.PENDING,
+        note: input.note ?? null,
+      },
     });
+
+    const slotCreatePromises = input.proposedSlots.map((slotStr) =>
+      tx.viewingTimeOption.create({
+        data: {
+          appointmentId: appointment.id,
+          proposedBy: tenantId,
+          startAt: new Date(slotStr),
+          isSelected: false,
+        },
+      }),
+    );
+
+    await Promise.all(slotCreatePromises);
+
+    return appointment;
   }
 
   /**
    * Tìm chi tiết lịch hẹn theo ID kèm các quan hệ
    */
-  public static async findAppointmentById(appointmentId: string) {
-    return prisma.viewingAppointment.findUnique({
+  public static async findAppointmentById(
+    appointmentId: string,
+    client: ViewingAppointmentDbClient = prisma,
+  ) {
+    return client.viewingAppointment.findUnique({
       where: { id: appointmentId },
       include: {
         room: {
@@ -141,11 +152,25 @@ export class ViewingAppointmentRepository {
   }
 
   /**
+   * Tìm trạng thái hiện tại của lịch hẹn theo ID
+   */
+  public static async findAppointmentStatusById(
+    appointmentId: string,
+    client: ViewingAppointmentDbClient = prisma,
+  ) {
+    return client.viewingAppointment.findUnique({
+      where: { id: appointmentId },
+      select: { status: true },
+    });
+  }
+
+  /**
    * Lấy danh sách lịch hẹn phân trang theo quyền và bộ lọc
    */
   public static async findAppointmentsList(
     user: { id: string; role: string },
     query: ViewingAppointmentListQuery,
+    client: ViewingAppointmentDbClient = prisma,
   ) {
     const where: Prisma.ViewingAppointmentWhereInput = {};
 
@@ -182,7 +207,7 @@ export class ViewingAppointmentRepository {
     const take = query.pageSize;
 
     const [items, total] = await Promise.all([
-      prisma.viewingAppointment.findMany({
+      client.viewingAppointment.findMany({
         where,
         skip,
         take,
@@ -205,109 +230,69 @@ export class ViewingAppointmentRepository {
           },
         },
       }),
-      prisma.viewingAppointment.count({ where }),
+      client.viewingAppointment.count({ where }),
     ]);
 
     return { items, total };
   }
 
   /**
-   * Xác nhận lịch hẹn bên trong transaction:
-   * - Kiểm tra trạng thái hiện tại (phải là PENDING)
-   * - Kiểm tra selectedSlotId thuộc đúng appointment
-   * - Kiểm tra xung đột với các lịch hẹn CONFIRMED khác cùng phòng
-   * - Cập nhật isSelected = true và status = CONFIRMED
+   * Tìm lịch hẹn đã CONFIRMED bị trùng khung giờ của cùng phòng
    */
-  public static async confirmAppointmentInTx(
+  public static async findConflictingConfirmedAppointment(
     appointmentId: string,
-    selectedSlotId: string,
+    roomId: string,
+    windowStart: Date,
+    windowEnd: Date,
+    client: ViewingAppointmentDbClient = prisma,
   ) {
-    try {
-      return await prisma.$transaction(
-        async (tx) => {
-          const appointment = await tx.viewingAppointment.findUnique({
-            where: { id: appointmentId },
-            include: { timeOptions: true },
-          });
-
-          if (!appointment) {
-            throw new ApiError(404, 'APPOINTMENT_NOT_FOUND', 'Lịch hẹn không tồn tại hoặc bạn không có quyền truy cập');
-          }
-          if (appointment.status !== VIEWING_STATUS.PENDING) {
-            throw new ApiError(409, 'CONFLICT', `Không thể xác nhận lịch hẹn ở trạng thái ${appointment.status}`);
-          }
-
-          const chosenSlot = appointment.timeOptions.find((slot) => slot.id === selectedSlotId);
-          if (!chosenSlot) {
-            throw new ApiError(400, 'VALIDATION_ERROR', 'Khung giờ được chọn không thuộc danh sách đề xuất của lịch hẹn này', {
-              selectedSlotId: ['Mã khung giờ không thuộc lịch hẹn này'],
-            });
-          }
-
-          const slotStart = chosenSlot.startAt;
-          const durationMs = DEFAULT_VIEWING_DURATION_MINUTES * 60 * 1000;
-          const conflictingAppointment = await tx.viewingAppointment.findFirst({
-            where: {
-              id: { not: appointmentId },
-              roomId: appointment.roomId,
-              status: VIEWING_STATUS.CONFIRMED,
-              selectedSlot: {
-                startAt: {
-                  gt: new Date(slotStart.getTime() - durationMs),
-                  lt: new Date(slotStart.getTime() + durationMs),
-                },
-              },
-            },
-            include: { selectedSlot: true },
-          });
-
-          if (conflictingAppointment) {
-            throw new ApiError(
-              409,
-              'SLOT_CONFLICT',
-              'Khung giờ này đã bị trùng với một lịch hẹn khác đã xác nhận cho phòng này',
-            );
-          }
-
-          await tx.viewingTimeOption.update({
-            where: { id: selectedSlotId },
-            data: { isSelected: true },
-          });
-
-          return tx.viewingAppointment.update({
-            where: { id: appointmentId },
-            data: { status: VIEWING_STATUS.CONFIRMED, selectedSlotId },
-            include: {
-              selectedSlot: { select: { id: true, startAt: true } },
-            },
-          });
+    return client.viewingAppointment.findFirst({
+      where: {
+        id: { not: appointmentId },
+        roomId,
+        status: VIEWING_STATUS.CONFIRMED,
+        selectedSlot: {
+          startAt: {
+            gt: windowStart,
+            lt: windowEnd,
+          },
         },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-      );
-    } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'P2034') {
-        const current = await prisma.viewingAppointment.findUnique({
-          where: { id: appointmentId },
-          select: { status: true },
-        });
-        if (current && current.status !== VIEWING_STATUS.PENDING) {
-          throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã được xử lý bởi một yêu cầu đồng thời khác');
-        }
-        throw new ApiError(
-          409,
-          'SLOT_CONFLICT',
-          'Khung giờ này vừa được xác nhận cho một lịch hẹn khác của phòng',
-        );
-      }
-      throw error;
-    }
+      },
+      include: { selectedSlot: true },
+    });
   }
 
   /**
-   * Cập nhật trạng thái từ chối lịch hẹn
+   * Đánh dấu slot được chọn và chuyển lịch hẹn sang trạng thái CONFIRMED trong transaction (bắt buộc truyền tx)
    */
-  public static async rejectAppointment(appointmentId: string, reason: string) {
-    const result = await prisma.viewingAppointment.updateMany({
+  public static async confirmAppointmentSelection(
+    appointmentId: string,
+    selectedSlotId: string,
+    tx: Prisma.TransactionClient,
+  ) {
+    await tx.viewingTimeOption.update({
+      where: { id: selectedSlotId },
+      data: { isSelected: true },
+    });
+
+    return tx.viewingAppointment.update({
+      where: { id: appointmentId },
+      data: { status: VIEWING_STATUS.CONFIRMED, selectedSlotId },
+      include: {
+        selectedSlot: { select: { id: true, startAt: true } },
+      },
+    });
+  }
+
+  /**
+   * Atomic conditional update: chuyển trạng thái PENDING -> REJECTED kèm lý do
+   */
+  public static async rejectAppointment(
+    appointmentId: string,
+    reason: string,
+    client: ViewingAppointmentDbClient = prisma,
+  ): Promise<{ count: number }> {
+    const result = await client.viewingAppointment.updateMany({
       where: { id: appointmentId, status: VIEWING_STATUS.PENDING },
       data: {
         status: VIEWING_STATUS.REJECTED,
@@ -315,21 +300,19 @@ export class ViewingAppointmentRepository {
       },
     });
 
-    if (result.count === 0) {
-      throw new ApiError(409, 'CONFLICT', 'Lịch hẹn không còn ở trạng thái PENDING để từ chối');
-    }
-    return { id: appointmentId };
+    return { count: result.count };
   }
 
   /**
-   * Cập nhật trạng thái hủy lịch hẹn nếu trạng thái vẫn khớp với lần kiểm tra của service
+   * Atomic conditional update: hủy lịch hẹn nếu trạng thái vẫn khớp với trạng thái mong đợi
    */
   public static async cancelAppointment(
     appointmentId: string,
     reason: string,
     expectedStatus: typeof VIEWING_STATUS.PENDING | typeof VIEWING_STATUS.CONFIRMED,
-  ) {
-    const result = await prisma.viewingAppointment.updateMany({
+    client: ViewingAppointmentDbClient = prisma,
+  ): Promise<{ count: number }> {
+    const result = await client.viewingAppointment.updateMany({
       where: { id: appointmentId, status: expectedStatus },
       data: {
         status: VIEWING_STATUS.CANCELLED,
@@ -337,9 +320,6 @@ export class ViewingAppointmentRepository {
       },
     });
 
-    if (result.count === 0) {
-      throw new ApiError(409, 'CONFLICT', 'Lịch hẹn đã được xử lý bởi một yêu cầu đồng thời khác');
-    }
-    return { id: appointmentId };
+    return { count: result.count };
   }
 }
