@@ -70,6 +70,28 @@ describe('Phase 3 Shared Status Constants', () => {
     }
   });
 
+  test('NOTIFICATION_EVENT_TYPE có đủ 5 hằng số cho phân hệ cư trú (BE-P3-08) và đều <= 40 ký tự', () => {
+    const residentEvents = [
+      NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_RECEIVED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_JOINED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_REJECTED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_CANCELLED,
+      NOTIFICATION_EVENT_TYPE.RESIDENT_REMOVED,
+    ];
+
+    assert.deepEqual(residentEvents, [
+      'RESIDENT_INVITATION_RECEIVED',
+      'RESIDENT_JOINED',
+      'RESIDENT_INVITATION_REJECTED',
+      'RESIDENT_INVITATION_CANCELLED',
+      'RESIDENT_REMOVED',
+    ]);
+
+    for (const eventType of residentEvents) {
+      assert.ok(eventType.length <= 40, `${eventType} vượt quá VARCHAR(40)`);
+    }
+  });
+
   test('ánh xạ danh mục thông báo (category) & chuẩn hóa tiêu đề hoạt động chính xác', () => {
     assert.equal(
       getNotificationCategory(NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED),
@@ -77,6 +99,14 @@ describe('Phase 3 Shared Status Constants', () => {
     );
     assert.equal(
       getNotificationCategory(NOTIFICATION_EVENT_TYPE.VIEWING_APPOINTMENT_CREATED),
+      NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_REJECTED),
+      NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
+    );
+    assert.equal(
+      getNotificationCategory(NOTIFICATION_EVENT_TYPE.RESIDENT_INVITATION_CANCELLED),
       NOTIFICATION_CATEGORY.BOOKING_CONTRACT,
     );
     assert.equal(
