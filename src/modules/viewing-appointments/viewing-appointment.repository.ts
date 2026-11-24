@@ -67,15 +67,15 @@ export class ViewingAppointmentRepository {
   }
 
   /**
-   * Tạo ViewingAppointment cùng các ViewingTimeOption bằng client/tx được truyền vào
+   * Tạo ViewingAppointment cùng các ViewingTimeOption trong transaction (bắt buộc truyền tx)
    */
   public static async createAppointmentWithSlots(
     tenantId: string,
     contactPhone: string,
     input: CreateViewingAppointmentInput,
-    client: ViewingAppointmentDbClient = prisma,
+    tx: Prisma.TransactionClient,
   ) {
-    const appointment = await client.viewingAppointment.create({
+    const appointment = await tx.viewingAppointment.create({
       data: {
         roomId: input.roomId,
         tenantId,
@@ -86,7 +86,7 @@ export class ViewingAppointmentRepository {
     });
 
     const slotCreatePromises = input.proposedSlots.map((slotStr) =>
-      client.viewingTimeOption.create({
+      tx.viewingTimeOption.create({
         data: {
           appointmentId: appointment.id,
           proposedBy: tenantId,
@@ -263,19 +263,19 @@ export class ViewingAppointmentRepository {
   }
 
   /**
-   * Đánh dấu slot được chọn và chuyển lịch hẹn sang trạng thái CONFIRMED
+   * Đánh dấu slot được chọn và chuyển lịch hẹn sang trạng thái CONFIRMED trong transaction (bắt buộc truyền tx)
    */
   public static async confirmAppointmentSelection(
     appointmentId: string,
     selectedSlotId: string,
-    client: ViewingAppointmentDbClient = prisma,
+    tx: Prisma.TransactionClient,
   ) {
-    await client.viewingTimeOption.update({
+    await tx.viewingTimeOption.update({
       where: { id: selectedSlotId },
       data: { isSelected: true },
     });
 
-    return client.viewingAppointment.update({
+    return tx.viewingAppointment.update({
       where: { id: appointmentId },
       data: { status: VIEWING_STATUS.CONFIRMED, selectedSlotId },
       include: {

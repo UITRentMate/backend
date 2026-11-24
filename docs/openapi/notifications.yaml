@@ -52,8 +52,9 @@ paths:
           schema:
             type: integer
             minimum: 1
+            maximum: 10000
             default: 1
-          description: Số trang hiện tại (bắt đầu từ 1).
+          description: Số trang hiện tại (bắt đầu từ 1, tối đa 10000).
         - name: limit
           in: query
           required: false
@@ -291,6 +292,34 @@ components:
           type:
             - object
             - 'null'
+          description: Dữ liệu JSON mở rộng đi kèm thông báo (có thể là null).
+          properties:
+            content:
+              type:
+                - string
+                - 'null'
+              description: Nội dung chi tiết của thông báo.
+            actionUrl:
+              type:
+                - string
+                - 'null'
+              description: Đường dẫn điều hướng trên Frontend khi người dùng nhấn vào thông báo.
+            relatedEntityType:
+              type:
+                - string
+                - 'null'
+              description: Loại thực thể nghiệp vụ liên quan (ví dụ VIEWING_APPOINTMENT, CONTRACT).
+            relatedEntityId:
+              type:
+                - string
+                - 'null'
+              description: Định danh của thực thể nghiệp vụ liên quan.
+            metadata:
+              type:
+                - object
+                - 'null'
+              additionalProperties: true
+              description: Metadata bổ sung tùy theo từng loại sự kiện thông báo.
           additionalProperties: true
         isRead:
           type: boolean

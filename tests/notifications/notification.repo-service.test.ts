@@ -8,6 +8,7 @@ import {
   NOTIFICATION_EVENT_TYPE,
 } from '../../src/common/constants/phase3-status';
 import { ApiError } from '../../src/common/errors/api-error';
+import { createNotification } from '../../src/common/utils/notification.util';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { NotificationRepository } from '../../src/modules/notifications/notification.repository';
 import { NotificationService } from '../../src/modules/notifications/notification.service';
@@ -205,5 +206,158 @@ describe('Notification Repository & Service', () => {
     const missing = await NotificationRepository.findByIdAndMarkRead(userId, notifId);
     assert.equal(missing, null);
     assert.equal(txCalled, 0);
+  });
+
+  test('createNotification hỗ trợ object có toJSON(), nested toJSON(), bỏ qua thuộc tính toJSON() => undefined và từ chối vòng lặp / class thường', async () => {
+    let capturedData: any;
+    const fakeDb: any = {
+      notification: {
+        create: async (args: any) => {
+          capturedData = args.data;
+          return { id: 'n-tojson', ...args.data };
+        },
+      },
+    };
+
+    class DecimalLike {
+      constructor(private readonly raw: string) {}
+      toJSON() {
+        return this.raw;
+      }
+    }
+
+    class InnerSummary {
+      toJSON() {
+        return {
+          amount: new DecimalLike('2500000.50'),
+          createdAt: new Date('2026-11-24T03:00:00.000Z'),
+        };
+      }
+    }
+
+    class OuterPayload {
+      toJSON() {
+        return {
+          content: 'Hóa đơn mới',
+          summary: new InnerSummary(),
+          omittedField: { toJSON: () => undefined },
+        };
+      }
+    }
+
+    const sharedAmount = new DecimalLike('100000');
+
+    await createNotification(fakeDb, {
+      recipientId: '550e8400-e29b-41d4-a716-446655440010',
+      title: 'Hỗ trợ toJSON',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: new OuterPayload() as unknown as Record<string, never>,
+    });
+
+    assert.deepEqual(capturedData.payload, {
+      content: 'Hóa đơn mới',
+      summary: {
+        amount: '2500000.50',
+        createdAt: '2026-11-24T03:00:00.000Z',
+      },
+    });
+
+    await createNotification(fakeDb, {
+      recipientId: '550e8400-e29b-41d4-a716-446655440010',
+      title: 'Shared toJSON không phải vòng lặp',
+      eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+      payload: {
+        metadata: {
+          min: sharedAmount as unknown as string,
+          max: sharedAmount as unknown as string,
+          ignored: { toJSON: () => undefined } as unknown as string,
+        },
+      },
+    });
+
+    assert.deepEqual(capturedData.payload, {
+      metadata: {
+        min: '100000',
+        max: '100000',
+      },
+    });
+
+    // toJSON() trả về this hoặc tham chiếu vòng gián tiếp -> TypeError
+    const selfToJson: { toJSON(): unknown } = {
+      toJSON() {
+        return selfToJson;
+      },
+    };
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Vòng lặp toJSON trực tiếp',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: selfToJson as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    const indirectCircular: Record<string, unknown> = {
+      toJSON() {
+        return { nested: indirectCircular };
+      },
+    };
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Vòng lặp toJSON gián tiếp',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: indirectCircular as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    // toJSON() trả về undefined ở root hoặc trong mảng -> TypeError
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Root toJSON undefined',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: { toJSON: () => undefined } as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    await assert.rejects(
+      () =>
+        createNotification(fakeDb, {
+          recipientId: '550e8400-e29b-41d4-a716-446655440010',
+          title: 'Array element toJSON undefined',
+          eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+          payload: [{ toJSON: () => undefined }] as unknown as Record<string, never>,
+        }),
+      TypeError,
+    );
+
+    // Non-plain objects không có toJSON() vẫn phải ném TypeError
+    class PlainCustomClass {
+      readonly value = 1;
+    }
+    for (const invalidObj of [
+      new PlainCustomClass(),
+      new Map([['a', 1]]),
+      new Set([1, 2]),
+      /abc/,
+    ]) {
+      await assert.rejects(
+        () =>
+          createNotification(fakeDb, {
+            recipientId: '550e8400-e29b-41d4-a716-446655440010',
+            title: 'Non-plain object không có toJSON',
+            eventType: NOTIFICATION_EVENT_TYPE.DEPOSIT_CONFIRMED,
+            payload: { metadata: { invalidObj } } as unknown as Record<string, never>,
+          }),
+        TypeError,
+      );
+    }
   });
 });

@@ -37,10 +37,29 @@ export function normalizeNotificationTitle(title: string): string {
   return codePoints.slice(0, MAX_NOTIFICATION_TITLE_LENGTH).join('');
 }
 
+const OMIT_JSON_VALUE = Symbol('OMIT_JSON_VALUE');
+
 function sanitizeJsonValue(
   value: unknown,
   seen: WeakSet<object>,
-): Prisma.InputJsonValue | null {
+): Prisma.InputJsonValue | null;
+function sanitizeJsonValue(
+  value: unknown,
+  seen: WeakSet<object>,
+  allowUndefined: true,
+): Prisma.InputJsonValue | null | typeof OMIT_JSON_VALUE;
+function sanitizeJsonValue(
+  value: unknown,
+  seen: WeakSet<object>,
+  allowUndefined = false,
+): Prisma.InputJsonValue | null | typeof OMIT_JSON_VALUE {
+  if (value === undefined) {
+    if (allowUndefined) {
+      return OMIT_JSON_VALUE;
+    }
+    throw new TypeError('Payload thông báo chứa giá trị undefined không hợp lệ');
+  }
+
   if (value === null) {
     return null;
   }
@@ -84,6 +103,14 @@ function sanitizeJsonValue(
       return items;
     }
 
+    const toJson = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJson === 'function') {
+      const serialized = (toJson as () => unknown).call(value);
+      return allowUndefined
+        ? sanitizeJsonValue(serialized, seen, true)
+        : sanitizeJsonValue(serialized, seen);
+    }
+
     const proto = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) {
       throw new TypeError('Payload thông báo chỉ chấp nhận plain object hoặc giá trị JSON hợp lệ');
@@ -91,10 +118,11 @@ function sanitizeJsonValue(
 
     const record: Record<string, Prisma.InputJsonValue | null> = {};
     for (const [key, entryValue] of Object.entries(value)) {
-      if (entryValue === undefined) {
+      const sanitizedEntry = sanitizeJsonValue(entryValue, seen, true);
+      if (sanitizedEntry === OMIT_JSON_VALUE) {
         continue;
       }
-      record[key] = sanitizeJsonValue(entryValue, seen);
+      record[key] = sanitizedEntry;
     }
     return record;
   } finally {
