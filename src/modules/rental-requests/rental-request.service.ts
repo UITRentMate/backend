@@ -1,6 +1,11 @@
 import { Prisma } from '@prisma/client';
+import { NOTIFICATION_EVENT_TYPE, PHASE3_TIME_LIMITS_MS } from '../../common/constants/phase3-status';
 import { ApiError } from '../../common/errors/api-error';
-import { prisma } from '../../infrastructure/database/prisma';
+import { recordAuditLog } from '../../common/utils/audit-log.util';
+import { createNotification, createNotificationsBatch } from '../../common/utils/notification.util';
+import { mapToContract } from '../contracts/contract.mapper';
+import { createDraftContract, findLiveContract, lockHoldRoom, withHoldTransaction } from '../contracts/contract.repository';
+import { expireHoldForRoom } from '../contracts/contract.service';
 import { RentalRequestRepository } from './rental-request.repository';
 import {
   mapToRentalRequestCreated,
@@ -20,7 +25,7 @@ import type {
 async function withSerializableRetry<T>(work: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      return await prisma.$transaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      return await withHoldTransaction(work, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
     } catch (error) {
       if (!(error && typeof error === 'object' && 'code' in error && error.code === 'P2034') || attempt === 2) {
         throw error;
@@ -30,7 +35,94 @@ async function withSerializableRetry<T>(work: (tx: Prisma.TransactionClient) => 
   throw new ApiError(409, 'DUPLICATE_RENTAL_REQUEST', 'Bạn đã có một yêu cầu thuê đang chờ duyệt cho phòng này');
 }
 
+function addMonths(start: Date, months: number): Date {
+  const target = new Date(start);
+  target.setUTCMonth(target.getUTCMonth() + months, 1);
+  const lastDayOfTargetMonth = new Date(target);
+  lastDayOfTargetMonth.setUTCMonth(target.getUTCMonth() + 1, 0);
+  target.setUTCDate(Math.min(start.getUTCDate(), lastDayOfTargetMonth.getUTCDate()));
+  return target;
+}
+
 export class RentalRequestService {
+  public static async approveRentalRequest(landlordId: string, requestId: string) {
+    const notFound = new ApiError(404, 'NOT_FOUND', 'Không tìm thấy yêu cầu thuê');
+    const reference = await RentalRequestRepository.findRoomForApproval(requestId, landlordId);
+    if (!reference) throw notFound;
+    const { roomId } = reference;
+    await expireHoldForRoom(roomId);
+
+    const invalidStatus = new ApiError(409, 'INVALID_RENTAL_REQUEST_STATUS', 'Chỉ có thể duyệt yêu cầu thuê đang chờ');
+    const unavailable = new ApiError(409, 'ROOM_ALREADY_HELD', 'Phòng không đủ điều kiện giữ chỗ');
+    try {
+      return await withHoldTransaction(async (tx) => {
+        await lockHoldRoom(tx, roomId);
+        const request = await RentalRequestRepository.findRequestForApproval(requestId, landlordId, tx);
+        if (!request || request.roomId !== roomId) throw notFound;
+        if (request.status !== 'PENDING') throw invalidStatus;
+        const { room } = request;
+        if (room.occupancyStatus !== 'VACANT' || room.isArchived || room.property.status !== 'ACTIVE'
+          || await findLiveContract(tx, roomId)) throw unavailable;
+
+        const now = new Date();
+        const updated = await RentalRequestRepository.approvePendingRequest(tx, requestId, now);
+        if (updated.count === 0) throw invalidStatus;
+        const reason = 'Phòng đã được giữ chỗ cho một yêu cầu thuê khác';
+        const rejected = await RentalRequestRepository.rejectCompetingRequests(tx, roomId, requestId, now, reason);
+        await RentalRequestRepository.holdRoom(tx, roomId);
+        const contract = await createDraftContract(tx, {
+          roomId,
+          tenantId: request.tenantId,
+          rentalRequestId: requestId,
+          startDate: request.desiredStartDate,
+          endDate: addMonths(request.desiredStartDate, request.durationMonths ?? 6),
+          rentSnapshot: room.monthlyRent,
+          depositSnapshot: room.depositRequired,
+          electricityRate: room.electricityRate,
+          waterRate: room.waterRate,
+          holdExpiresAt: new Date(now.getTime() + PHASE3_TIME_LIMITS_MS.CONTRACT_DRAFT_HOLD_MS),
+          contractServiceFees: { create: room.serviceFees },
+        });
+        await createNotificationsBatch(tx, rejected.map(({ id, tenantId }) => ({
+          recipientId: tenantId,
+          title: 'Yêu cầu thuê phòng đã bị từ chối',
+          eventType: NOTIFICATION_EVENT_TYPE.RENTAL_REQUEST_AUTO_REJECTED,
+          payload: {
+            content: reason,
+            actionUrl: `/rental-requests/${id}`,
+            relatedEntityType: 'RENTAL_REQUEST',
+            relatedEntityId: id,
+          },
+        })));
+        await createNotification(tx, {
+          recipientId: request.tenantId,
+          title: 'Yêu cầu thuê phòng đã được duyệt',
+          eventType: NOTIFICATION_EVENT_TYPE.RENTAL_REQUEST_APPROVED,
+          payload: {
+            content: 'Chủ trọ đã duyệt yêu cầu thuê. Phòng được giữ chỗ trong 48 giờ.',
+            actionUrl: `/contracts/${contract.id}`,
+            relatedEntityType: 'CONTRACT',
+            relatedEntityId: contract.id,
+          },
+        });
+        await recordAuditLog(tx, {
+          actorId: landlordId,
+          entityType: 'RENTAL_REQUEST',
+          entityId: requestId,
+          action: NOTIFICATION_EVENT_TYPE.RENTAL_REQUEST_APPROVED,
+          oldData: { status: 'PENDING' },
+          newData: { status: 'APPROVED', roomId, contractId: contract.id, holdExpiresAt: contract.holdExpiresAt?.toISOString() },
+        });
+        return { rentalRequestId: requestId, status: 'APPROVED' as const, reviewedAt: now.toISOString(), contract: mapToContract(contract) };
+      });
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw unavailable;
+      }
+      throw error;
+    }
+  }
+
   /**
    * RENT-01: Gửi yêu cầu thuê phòng công khai
    */
@@ -38,8 +130,10 @@ export class RentalRequestService {
     tenantId: string,
     input: CreateRentalRequestInput,
   ): Promise<RentalRequestCreatedResponse> {
+    await expireHoldForRoom(input.roomId);
     try {
       const created = await withSerializableRetry(async (tx) => {
+        await lockHoldRoom(tx, input.roomId);
         // 1. Kiểm tra phòng tồn tại và thỏa mãn 5 điều kiện hiển thị công khai
         const eligibleRoom = await RentalRequestRepository.findEligiblePublicRoom(input.roomId, tx);
         if (!eligibleRoom) {
@@ -133,7 +227,8 @@ export class RentalRequestService {
       );
     }
 
-    return mapToRentalRequestDetail(detail as any);
+    await expireHoldForRoom(detail.roomId);
+    return mapToRentalRequestDetail(detail);
   }
 
   /**

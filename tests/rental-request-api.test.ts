@@ -71,7 +71,9 @@ test('POST without authentication returns 401 UNAUTHORIZED', async () => {
 
 test('POST creates a PENDING request for an authenticated tenant', async () => {
   stub(prisma.user, 'findUnique', async () => tenant);
+  stub(prisma.contract, 'findMany', async () => []);
   stub(prisma, '$transaction', async (work: (tx: any) => Promise<unknown>) => work({
+    $queryRaw: async () => [],
     room: { findFirst: async ({ where }: any) => where.id === roomId ? { id: roomId } : null },
     rentalRequest: {
       findFirst: async () => null,
@@ -105,6 +107,7 @@ test('POST creates a PENDING request for an authenticated tenant', async () => {
 
 test('POST maps a concurrent duplicate insert to 409 DUPLICATE_RENTAL_REQUEST', async () => {
   stub(prisma.user, 'findUnique', async () => tenant);
+  stub(prisma.contract, 'findMany', async () => []);
   stub(prisma, '$transaction', async () => { throw { code: 'P2002' }; });
 
   await withApi(async (baseUrl) => {

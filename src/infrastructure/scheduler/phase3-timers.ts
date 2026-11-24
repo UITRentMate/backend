@@ -1,3 +1,5 @@
+import { expireOverdueHeldContracts } from '../../modules/contracts/contract.service';
+
 export interface ScheduledJobDefinition {
   name: string;
   intervalMs: number;
@@ -12,6 +14,14 @@ const activeTimers: NodeJS.Timeout[] = [];
  */
 export function registerPhase3Job(job: ScheduledJobDefinition): void {
   registeredJobs.set(job.name, job);
+}
+
+export function registerContractHoldExpiryJob(): void {
+  registerPhase3Job({
+    name: 'contract-hold-expiry',
+    intervalMs: 5 * 60 * 1000,
+    handler: async () => { await expireOverdueHeldContracts(); },
+  });
 }
 
 /**

@@ -1,0 +1,96 @@
+openapi: 3.1.0
+info:
+  title: RentMate API — Hợp đồng và tiền cọc
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000
+paths:
+  /api/v1/contracts/{contractId}/cancel-hold:
+    patch:
+      summary: Hủy giữ chỗ
+      operationId: cancelContractHold
+      description: |
+        Chủ phòng hoặc người thuê đứng tên có thể hủy ở DRAFT, PENDING_TENANT_CONFIRMATION và AWAITING_DEPOSIT.
+        Chủ phòng phải xử lý biên lai PENDING trước khi hủy ở AWAITING_DEPOSIT. Phòng chỉ được giải phóng khi không còn hợp đồng live.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, minLength: 10, maxLength: 500, description: Lý do sau khi bỏ khoảng trắng hai đầu }
+      responses:
+        '200':
+          description: Hợp đồng đã hủy
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Contract'
+                  - properties:
+                      status: { const: CANCELLED }
+        '400':
+          $ref: './rental-requests.yaml#/components/responses/ValidationError'
+        '401':
+          $ref: './rental-requests.yaml#/components/responses/UnauthorizedError'
+        '403':
+          $ref: './rental-requests.yaml#/components/responses/ForbiddenError'
+        '404':
+          description: NOT_FOUND nếu hợp đồng không tồn tại hoặc nằm ngoài phạm vi quyền
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '409':
+          description: CANNOT_CANCEL_AFTER_DEPOSIT_CONFIRMED, PENDING_DEPOSIT_RECEIPT_EXISTS hoặc INVALID_CONTRACT_STATUS
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '500':
+          $ref: './rental-requests.yaml#/components/responses/InternalError'
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Contract:
+      type: object
+      required: [id, roomId, tenantId, rentalRequestId, startDate, endDate, status, rentSnapshot, depositSnapshot, electricityRate, waterRate, holdExpiresAt, depositDeadlineAt, cancellationReason, serviceFees]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        rentalRequestId: { type: [string, "null"], format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        status:
+          type: string
+          enum: [DRAFT, PENDING_TENANT_CONFIRMATION, AWAITING_DEPOSIT, DEPOSIT_CONFIRMED, ACTIVE, LIQUIDATING, TERMINATED, CANCELLED, EXPIRED]
+        rentSnapshot: { type: number }
+        depositSnapshot: { type: number }
+        electricityRate: { type: number }
+        waterRate: { type: number }
+        holdExpiresAt: { type: [string, "null"], format: date-time }
+        depositDeadlineAt: { type: [string, "null"], format: date-time }
+        cancellationReason: { type: [string, "null"] }
+        serviceFees:
+          type: array
+          items:
+            type: object
+            required: [feeName, monthlyAmount]
+            properties:
+              feeName: { type: string }
+              monthlyAmount: { type: number }

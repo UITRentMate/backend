@@ -3,6 +3,52 @@ import { prisma } from '../../infrastructure/database/prisma';
 import type { RentalRequestFilterQuery } from './rental-request.types';
 
 export class RentalRequestRepository {
+  public static findRoomForApproval(requestId: string, landlordId: string) {
+    return prisma.rentalRequest.findFirst({
+      where: { id: requestId, room: { property: { landlordId } } },
+      select: { roomId: true },
+    });
+  }
+
+  public static findRequestForApproval(
+    requestId: string,
+    landlordId: string,
+    client: Prisma.TransactionClient,
+  ) {
+    return client.rentalRequest.findFirst({
+      where: { id: requestId, room: { property: { landlordId } } },
+      include: {
+        room: {
+          include: {
+            property: { select: { status: true } },
+            serviceFees: { select: { feeName: true, monthlyAmount: true } },
+          },
+        },
+      },
+    });
+  }
+
+  public static approvePendingRequest(tx: Prisma.TransactionClient, requestId: string, reviewedAt: Date) {
+    return tx.rentalRequest.updateMany({
+      where: { id: requestId, status: 'PENDING' },
+      data: { status: 'APPROVED', reviewedAt },
+    });
+  }
+
+  public static rejectCompetingRequests(
+    tx: Prisma.TransactionClient, roomId: string, approvedId: string, reviewedAt: Date, rejectionReason: string,
+  ) {
+    return tx.rentalRequest.updateManyAndReturn({
+      where: { roomId, id: { not: approvedId }, status: 'PENDING' },
+      data: { status: 'REJECTED', reviewedAt, rejectionReason },
+      select: { id: true, tenantId: true },
+    });
+  }
+
+  public static holdRoom(tx: Prisma.TransactionClient, roomId: string) {
+    return tx.room.update({ where: { id: roomId }, data: { occupancyStatus: 'HELD' } });
+  }
+
   /**
    * Kiểm tra điều kiện phòng công khai đủ điều kiện gửi yêu cầu (Room Discovery Phase 1)
    */

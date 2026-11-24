@@ -33,6 +33,13 @@ rentalRequestRouter.get(
   RentalRequestController.getRentalRequestDetail,
 );
 
+rentalRequestRouter.patch(
+  '/api/v1/rental-requests/:requestId/approve',
+  requireAuth,
+  requireRole('LANDLORD'),
+  RentalRequestController.approveRentalRequest,
+);
+
 // RENT-05: Từ chối yêu cầu thuê PENDING kèm lý do (Actor: LANDLORD)
 rentalRequestRouter.patch(
   '/api/v1/rental-requests/:requestId/reject',

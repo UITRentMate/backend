@@ -2,7 +2,7 @@
 // DTOs & Interfaces cho phân hệ Quản lý yêu cầu thuê phòng (Issue #19)
 // ============================================================================
 
-export type RentalRequestStatus = 'PENDING' | 'REJECTED';
+export type RentalRequestStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
 
 export interface CreateRentalRequestInput {
   roomId: string;

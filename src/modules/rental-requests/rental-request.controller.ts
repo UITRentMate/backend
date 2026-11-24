@@ -74,6 +74,12 @@ export class RentalRequestController {
     }
   }
 
+  public static async approveRentalRequest(req: Request, res: Response): Promise<void> {
+    const landlordId = requireCurrentUser(res).id;
+    const requestId = validateRentalRequestId(req.params.requestId);
+    res.status(200).json(await RentalRequestService.approveRentalRequest(landlordId, requestId));
+  }
+
   /**
    * PATCH /api/v1/rental-requests/:requestId/reject
    * RENT-05: Từ chối yêu cầu thuê
