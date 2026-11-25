@@ -1,9 +1,31 @@
 import bcrypt from 'bcrypt';
 import { Prisma } from '@prisma/client';
+import { PHASE3_TIME_LIMITS_MS } from '../../common/constants/phase3-status';
 import { ApiError } from '../../common/errors/api-error';
+import { recordAuditLog } from '../../common/utils/audit-log.util';
+import { getFrontendResetPasswordUrl } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
-import { ACCESS_TTL_SECONDS, assertJwtConfigured, hashRefreshToken, newRefreshToken, REFRESH_TTL_SECONDS, signAccessToken } from './auth.security';
-import type { parseLogin, parseRegister } from './auth.validation';
+import { defaultEmailSender, type EmailSender } from '../../infrastructure/mail/email.service';
+import { AuthRepository } from './auth.repository';
+import {
+  ACCESS_TTL_SECONDS,
+  assertJwtConfigured,
+  buildPasswordResetUrl,
+  hashRefreshToken,
+  newPasswordResetToken,
+  newRefreshToken,
+  REFRESH_TTL_SECONDS,
+  sha256Hex,
+  signAccessToken,
+} from './auth.security';
+import type { parseForgotPassword, parseLogin, parseRegister, parseResetPassword } from './auth.validation';
+
+export const FORGOT_PASSWORD_NEUTRAL_RESPONSE = {
+  success: true,
+  message: 'Nếu email tồn tại trong hệ thống, hướng dẫn đặt lại mật khẩu đã được gửi.',
+} as const;
+
+export const PASSWORD_RESET_COOLDOWN_MS = 60 * 1000;
 
 export const BCRYPT_ROUNDS = 12;
 
@@ -132,4 +154,127 @@ export async function logout(token: string | null) {
       data: { revokedAt: new Date() },
     });
   });
+}
+
+/**
+ * Khởi tạo yêu cầu đặt lại mật khẩu, luôn trả về phản hồi trung tính để tránh lộ thông tin tài khoản.
+ */
+export async function forgotPassword(
+  input: ReturnType<typeof parseForgotPassword>,
+  emailSender: EmailSender = defaultEmailSender,
+) {
+  const user = await AuthRepository.findUserForPasswordResetByEmail(input.email);
+  if (!user || user.accountStatus !== 'ACTIVE') {
+    return FORGOT_PASSWORD_NEUTRAL_RESPONSE;
+  }
+
+  const frontendResetUrl = getFrontendResetPasswordUrl();
+  const { rawToken, tokenHash } = newPasswordResetToken();
+  const resetUrl = buildPasswordResetUrl(frontendResetUrl, rawToken);
+
+  const txResult = await prisma.$transaction(async (tx) => {
+    await AuthRepository.lockUserForPasswordReset(tx, user.id);
+
+    const latestToken = await AuthRepository.findLatestPasswordResetTokenCreatedAt(user.id, tx);
+    const now = new Date();
+    if (latestToken && now.getTime() - latestToken.createdAt.getTime() < PASSWORD_RESET_COOLDOWN_MS) {
+      return { issued: false as const };
+    }
+
+    const expiresAt = new Date(now.getTime() + PHASE3_TIME_LIMITS_MS.PASSWORD_RESET_TTL_MS);
+    await AuthRepository.invalidateUnusedPasswordResetTokensInTx(tx, user.id, now);
+    const issued = await AuthRepository.createPasswordResetTokenInTx(tx, {
+      userId: user.id,
+      tokenHash,
+      expiresAt,
+    });
+
+    return {
+      issued: true as const,
+      tokenId: issued.id,
+      expiresAt: issued.expiresAt,
+    };
+  });
+
+  if (!txResult.issued) {
+    return FORGOT_PASSWORD_NEUTRAL_RESPONSE;
+  }
+
+  try {
+    await emailSender.sendPasswordResetEmail({
+      to: user.email,
+      fullName: user.fullName,
+      resetUrl,
+      expiresInMinutes: Math.round(PHASE3_TIME_LIMITS_MS.PASSWORD_RESET_TTL_MS / 60000),
+    });
+  } catch (error) {
+    await AuthRepository.deletePasswordResetTokenById(txResult.tokenId).catch((deleteError) => {
+      console.error('[auth.forgotPassword] Failed to delete password reset token after email error', {
+        tokenId: txResult.tokenId,
+        errorName: deleteError instanceof Error ? deleteError.name : 'UnknownError',
+      });
+    });
+    console.error('[auth.forgotPassword] Failed to send password reset email', {
+      userId: user.id,
+      tokenId: txResult.tokenId,
+      errorName: error instanceof Error ? error.name : 'UnknownError',
+    });
+    throw new ApiError(500, 'INTERNAL_ERROR', 'Hệ thống đang gặp sự cố tạm thời. Vui lòng thử lại sau.');
+  }
+
+  return FORGOT_PASSWORD_NEUTRAL_RESPONSE;
+}
+
+/**
+ * Đặt lại mật khẩu từ token khôi phục một lần, thu hồi toàn bộ phiên đăng nhập và ghi nhận AuditLog.
+ */
+export async function resetPassword(input: ReturnType<typeof parseResetPassword>) {
+  const tokenHash = sha256Hex(input.token);
+  const usable = await AuthRepository.hasUsableResetToken(tokenHash, new Date());
+  if (!usable) {
+    throw new ApiError(
+      400,
+      'INVALID_OR_EXPIRED_RESET_TOKEN',
+      'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn',
+    );
+  }
+
+  const newPasswordHash = await bcrypt.hash(input.newPassword, BCRYPT_ROUNDS);
+  const result = await withSerializableRetry(async (tx) => {
+    const now = new Date();
+    const consumed = await AuthRepository.consumeUsableResetTokenInTx(tx, tokenHash, now);
+    if (!consumed) {
+      return { status: 'invalid' as const };
+    }
+
+    await AuthRepository.updateUserPasswordAndRevokeSessionsInTx(tx, {
+      userId: consumed.userId,
+      newPasswordHash,
+      revokedAt: now,
+    });
+
+    await recordAuditLog(tx, {
+      actorId: consumed.userId,
+      entityType: 'User',
+      entityId: consumed.userId,
+      action: 'PASSWORD_RESET_COMPLETED',
+      oldData: null,
+      newData: { sessionsRevoked: true, resetTokenId: consumed.tokenId },
+    });
+
+    return { status: 'ok' as const, userId: consumed.userId };
+  });
+
+  if (result.status !== 'ok') {
+    throw new ApiError(
+      400,
+      'INVALID_OR_EXPIRED_RESET_TOKEN',
+      'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn',
+    );
+  }
+
+  return {
+    success: true,
+    message: 'Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại.',
+  };
 }

@@ -40,13 +40,34 @@ export function verifyAccessToken(token: string): string {
   }
 }
 
+export function sha256Hex(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
 export function newRefreshToken(): { token: string; tokenHash: string; familyId: string } {
   const token = randomBytes(32).toString('base64url');
   return { token, tokenHash: hashRefreshToken(token), familyId: randomUUID() };
 }
 
 export function hashRefreshToken(token: string): string {
-  return createHash('sha256').update(token).digest('hex');
+  return sha256Hex(token);
+}
+
+/**
+ * Tạo cặp rawToken ngẫu nhiên (64 ký tự hex) và tokenHash SHA-256 cho luồng đặt lại mật khẩu.
+ */
+export function newPasswordResetToken(): { rawToken: string; tokenHash: string } {
+  const rawToken = randomBytes(32).toString('hex');
+  return { rawToken, tokenHash: sha256Hex(rawToken) };
+}
+
+/**
+ * Gắn query param token vào URL đặt lại mật khẩu frontend.
+ */
+export function buildPasswordResetUrl(baseUrl: string, rawToken: string): string {
+  const url = new URL(baseUrl);
+  url.searchParams.set('token', rawToken);
+  return url.toString();
 }
 
 export function refreshCookieOptions(maxAge = REFRESH_TTL_SECONDS * 1000) {

@@ -11,6 +11,12 @@ export interface EmailSender {
   sendPasswordResetEmail(params: SendPasswordResetEmailParams): Promise<void>;
 }
 
+export const SMTP_TIMEOUTS_MS = {
+  CONNECTION: 10_000,
+  GREETING: 10_000,
+  SOCKET: 15_000,
+} as const;
+
 export interface SmtpConfig {
   host: string;
   port: number;
@@ -91,6 +97,9 @@ export class NodemailerEmailService implements EmailSender {
       host: config.host,
       port: config.port,
       secure: config.secure,
+      connectionTimeout: SMTP_TIMEOUTS_MS.CONNECTION,
+      greetingTimeout: SMTP_TIMEOUTS_MS.GREETING,
+      socketTimeout: SMTP_TIMEOUTS_MS.SOCKET,
       auth: {
         user: config.user,
         pass: config.pass,

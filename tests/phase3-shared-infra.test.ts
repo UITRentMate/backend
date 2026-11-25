@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
+import nodemailer from 'nodemailer';
 
 import { Prisma } from '@prisma/client';
 import {
@@ -26,6 +27,7 @@ import {
   buildPasswordResetEmailContent,
   loadSmtpConfigFromEnv,
   NodemailerEmailService,
+  SMTP_TIMEOUTS_MS,
 } from '../src/infrastructure/mail/email.service';
 import {
   clearRegisteredPhase3Jobs,
@@ -228,6 +230,51 @@ describe('Nodemailer Email Service Config & Content', () => {
     assert.match(content.text, /token=123&src=mail/);
     assert.ok(!content.html.includes('<script>'));
     assert.ok(content.html.includes('&lt;script&gt;'));
+  });
+
+  test('NodemailerEmailService cấu hình connectionTimeout, greetingTimeout và socketTimeout rõ ràng', async () => {
+    let capturedTransportOptions: any;
+    let capturedMailOptions: any;
+    const originalCreateTransport = nodemailer.createTransport;
+
+    (nodemailer as any).createTransport = (options: any) => {
+      capturedTransportOptions = options;
+      return {
+        sendMail: async (mailOptions: any) => {
+          capturedMailOptions = mailOptions;
+          return { messageId: 'test-msg-id' };
+        },
+      };
+    };
+
+    try {
+      const service = new NodemailerEmailService({
+        SMTP_HOST: 'smtp.example.com',
+        SMTP_PORT: '587',
+        SMTP_SECURE: 'false',
+        SMTP_USER: 'mailer@example.com',
+        SMTP_PASS: 'app-pass',
+        SMTP_FROM: 'UIT RentMate <mailer@example.com>',
+      });
+
+      await service.sendPasswordResetEmail({
+        to: 'user@example.com',
+        fullName: 'Test User',
+        resetUrl: 'http://localhost:5173/reset-password?token=abc',
+        expiresInMinutes: 15,
+      });
+
+      assert.equal(capturedTransportOptions.connectionTimeout, SMTP_TIMEOUTS_MS.CONNECTION);
+      assert.equal(capturedTransportOptions.greetingTimeout, SMTP_TIMEOUTS_MS.GREETING);
+      assert.equal(capturedTransportOptions.socketTimeout, SMTP_TIMEOUTS_MS.SOCKET);
+      assert.equal(capturedTransportOptions.connectionTimeout, 10_000);
+      assert.equal(capturedTransportOptions.greetingTimeout, 10_000);
+      assert.equal(capturedTransportOptions.socketTimeout, 15_000);
+      assert.equal(capturedMailOptions.to, 'user@example.com');
+      assert.equal(capturedMailOptions.from, 'UIT RentMate <mailer@example.com>');
+    } finally {
+      (nodemailer as any).createTransport = originalCreateTransport;
+    }
   });
 });
 

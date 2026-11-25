@@ -26,6 +26,48 @@ const loginSchema = z.object({
   password: z.string().min(1, 'Cần mật khẩu').refine((value) => Buffer.byteLength(value, 'utf8') <= 72, 'Mật khẩu không được vượt 72 byte UTF-8'),
 }).strict();
 
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().toLowerCase().email('Email không hợp lệ').max(255, 'Email không hợp lệ'),
+}).strict();
+
+export const resetPasswordSchema = z.object({
+  token: z.string().trim().min(1, 'Token đặt lại mật khẩu không được để trống').max(256, 'Token đặt lại mật khẩu không hợp lệ'),
+  newPassword: passwordSchema,
+  confirmPassword: z.string().optional(),
+  confirmNewPassword: z.string().optional(),
+}).strict().superRefine((input, ctx) => {
+  if (input.confirmPassword === undefined && input.confirmNewPassword === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['confirmNewPassword'],
+      message: 'Cần xác nhận mật khẩu mới',
+    });
+    return;
+  }
+
+  if (
+    input.confirmPassword !== undefined &&
+    input.confirmNewPassword !== undefined &&
+    input.confirmPassword !== input.confirmNewPassword
+  ) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['confirmNewPassword'],
+      message: 'Mật khẩu xác nhận không khớp',
+    });
+    return;
+  }
+
+  const confirmation = input.confirmNewPassword ?? input.confirmPassword;
+  if (confirmation !== input.newPassword) {
+    ctx.addIssue({
+      code: 'custom',
+      path: [input.confirmNewPassword !== undefined ? 'confirmNewPassword' : 'confirmPassword'],
+      message: 'Mật khẩu xác nhận không khớp',
+    });
+  }
+});
+
 function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (result.success) return result.data;
@@ -45,4 +87,13 @@ export function parseRegister(body: unknown) {
 
 export function parseLogin(body: unknown) {
   return parse(loginSchema, body);
+}
+
+export function parseForgotPassword(body: unknown) {
+  return parse(forgotPasswordSchema, body);
+}
+
+export function parseResetPassword(body: unknown) {
+  const { token, newPassword } = parse(resetPasswordSchema, body);
+  return { token, newPassword };
 }
