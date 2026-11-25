@@ -26,6 +26,10 @@ const loginSchema = z.object({
   password: z.string().min(1, 'Cần mật khẩu').refine((value) => Buffer.byteLength(value, 'utf8') <= 72, 'Mật khẩu không được vượt 72 byte UTF-8'),
 }).strict();
 
+export const forgotPasswordSchema = z.object({
+  email: z.string().trim().toLowerCase().email('Email không hợp lệ').max(255, 'Email không hợp lệ'),
+}).strict();
+
 function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   const result = schema.safeParse(body);
   if (result.success) return result.data;
@@ -45,4 +49,8 @@ export function parseRegister(body: unknown) {
 
 export function parseLogin(body: unknown) {
   return parse(loginSchema, body);
+}
+
+export function parseForgotPassword(body: unknown) {
+  return parse(forgotPasswordSchema, body);
 }
