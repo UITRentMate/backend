@@ -1,3 +1,5 @@
+import { autoCloseStaleRepairTickets } from '../../modules/repair-tickets/repair-ticket.service';
+
 export interface ScheduledJobDefinition {
   name: string;
   intervalMs: number;
@@ -67,4 +69,17 @@ export function clearRegisteredPhase3Jobs(): void {
 
 export function listRegisteredPhase3Jobs(): readonly ScheduledJobDefinition[] {
   return Array.from(registeredJobs.values());
+}
+
+/**
+ * Đăng ký tác vụ tự động đóng phiếu sự cố quá 5 ngày chưa nghiệm thu (chu kỳ 15 phút, batch 100).
+ */
+export function registerRepairTicketAutoCloseJob(): void {
+  registerPhase3Job({
+    name: 'repair-ticket-auto-close',
+    intervalMs: 15 * 60 * 1000,
+    handler: async () => {
+      await autoCloseStaleRepairTickets({ batchSize: 100 });
+    },
+  });
 }
