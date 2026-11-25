@@ -1,6 +1,12 @@
 import { app } from './app';
 import { PORT } from './config/env';
-import { startPhase3Timers, stopPhase3Timers } from './infrastructure/scheduler/phase3-timers';
+import {
+  registerRepairTicketAutoCloseJob,
+  startPhase3Timers,
+  stopPhase3Timers,
+} from './infrastructure/scheduler/phase3-timers';
+
+registerRepairTicketAutoCloseJob();
 
 const server = app.listen(PORT, () => {
   startPhase3Timers();

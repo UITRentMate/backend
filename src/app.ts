@@ -6,6 +6,7 @@ import { authRoutes } from './modules/auth/auth.routes';
 import { notificationRouter } from './modules/notifications/notification.routes';
 import { propertyRouter } from './modules/properties/property.routes';
 import { rentalRequestRouter } from './modules/rental-requests/rental-request.routes';
+import { repairTicketRouter } from './modules/repair-tickets/repair-ticket.routes';
 import { residentRouter } from './modules/residents/resident.routes';
 import { roomRouter } from './modules/rooms/room.routes';
 import { usersRoutes } from './modules/users/users.routes';
@@ -68,6 +69,9 @@ app.use(residentRouter);
 
 // Phân hệ Thông báo In-App (BE-P3-07 / Issue #36)
 app.use(notificationRouter);
+
+// Phân hệ Sự cố / Sửa chữa & Nghiệm thu (BE-P3-09 / Issue #38)
+app.use(repairTicketRouter);
 
 // Global Error Handler Middleware
 app.use(errorHandler);

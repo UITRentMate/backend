@@ -1,0 +1,1157 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Repair Tickets & Maintenance Acceptance API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract — **Approved Refine Final 2026-11-24**) cho phân hệ **Báo cáo Sự cố / Sửa chữa, Nghiệm thu & Luật bảo vệ 72h / 5 ngày (BE-P3-09 / Issue #38)** thuộc nền tảng RentMate.
+    Bao gồm 7 endpoint P0 thực thi quy trình `BP-08`, quy tắc nghiệp vụ `BR-10` và Use Case `UC-25`.
+
+    ### 1. Vòng đời Trạng thái (`RepairTicket` State Machine)
+    ```text
+    OPEN ──(Landlord accept: resolutionPlan, scheduledAt >= now - 5m)──► IN_PROGRESS
+     │                                                                      │    ▲
+     │ [Quá 72h chưa tiếp nhận:                                             │    │ (Tenant reject-completion:
+     │  DTO trả canEscalateToComplaint = true]                              │    │  reason + 0..3 ảnh REOPEN_EVIDENCE,
+     │                                                                      ▼    │  reset completedAt/repairCost/costBearer)
+     │                            (Landlord complete: 1..5 ảnh COMPLETION, repairCost?, costBearer?)
+     │                                                           AWAITING_CONFIRMATION
+     │                                                             /               \
+     │                                    (Tenant confirm-completion)       (Quá 5 ngày không phản hồi:
+     │                                                  ▼                    lazy-check + phase3-timers)
+     │                                               CLOSED ◄───────────────────────┘
+    ```
+
+    ### 2. Quy tắc Phân quyền Cư trú Hiện tại (Anti-IDOR)
+    - **Sự cố phòng riêng (`roomId != null`):** Mọi thành viên đang cư trú `ACTIVE` theo hợp đồng `ACTIVE` hiện tại của `roomId` (**Chủ hợp đồng `contract.tenantId` + tất cả `ContractResident` có `leftAt IS NULL`**) đều có quyền **xem (`GET`) VÀ nghiệm thu (`confirm-completion`, `reject-completion`)**. Thành viên đã rời phòng (`leftAt != null`) hoặc hợp đồng không còn `ACTIVE` bị cắt cả quyền xem lẫn quyền nghiệm thu (`404 REPAIR_TICKET_NOT_FOUND`), kể cả khi là người tạo phiếu.
+    - **Sự cố khu vực chung (`roomId = null`, gắn `propertyId`):** Mọi Tenant có ít nhất 1 hợp đồng `ACTIVE` tại `propertyId` đều được xem; chỉ **`createdById` VÀ đang còn cư trú `ACTIVE` tại `propertyId`** mới được nghiệm thu. Rời khu trọ bị cắt cả quyền xem lẫn quyền nghiệm thu (`404`).
+    - **Chủ trọ (`LANDLORD`):** Xem và xử lý (`accept`, `complete`) toàn bộ phiếu sự cố thuộc khu trọ mình sở hữu; bị chặn `403 FORBIDDEN` ở các endpoint tạo và nghiệm thu.
+
+    ### 3. Luật bảo vệ 72 giờ & 5 ngày (`BP-08`)
+    - **Luật 72 giờ chưa tiếp nhận:** Trường tính toán động `canEscalateToComplaint = (status === 'OPEN' && Date.now() - createdAt >= 72h)` (`PHASE3_TIME_LIMITS_MS.REPAIR_ESCALATION_WAIT_MS`), trả trên cả list item và detail DTO.
+    - **Luật 5 ngày tự động đóng:** Khi `status === 'AWAITING_CONFIRMATION'` và `completedAt + 5 ngày <= now`, hệ thống tự động chuyển `status = 'CLOSED'`, `closedAt = now()`, gửi thông báo `REPAIR_TICKET_CLOSED` (`metadata.autoClosed = true`) cho Chủ trọ và phía người thuê đang cư trú `ACTIVE`, và ghi `AuditLog` (`REPAIR_TICKET_AUTO_CLOSED`). Thực thi qua cả **lazy-check** (list, detail, confirm, reject) lẫn scheduler nội bộ `phase3-timers.ts` (15 phút/lần, batch 100, `FOR UPDATE SKIP LOCKED`).
+
+    ### 4. Upload Ảnh An toàn, Concurrency & Privacy-by-Default
+    - Ảnh hiện trường (`INITIAL`: 1–5 ảnh), ảnh hoàn tất (`COMPLETION`: 1–5 ảnh) và ảnh đối chứng mở lại (`REOPEN_EVIDENCE`: 0–3 ảnh) được upload qua `multipart/form-data` (tên trường `attachments`, tối đa 5MB/ảnh, xác thực MIME + Magic Bytes `JPEG/PNG/WEBP`).
+    - Upload Cloudinary thực hiện **ngoài** database transaction; nếu bất kỳ ảnh nào hoặc transaction DB thất bại, toàn bộ ảnh đã upload trong request sẽ bị xóa rollback khỏi Cloudinary.
+    - Các thao tác ghi khóa hàng bằng `SELECT ... FOR UPDATE` (`contracts` khi tạo mới, `repair_tickets` khi cập nhật) và kiểm tra lại quyền cư trú `ACTIVE` / trạng thái sau khi khóa.
+    - Privacy-by-Default: mọi thông tin người dùng chỉ trả `{ id, fullName, avatarUrl }` (ẩn hoàn toàn `email`, `phone`, `passwordHash`, `password_hash`).
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+  - url: https://api.rentmate.vn
+    description: Máy chủ chính thức (Production)
+
+tags:
+  - name: Repair Tickets
+    description: Quản lý phiếu báo cáo sự cố, tiếp nhận, sửa chữa và nghiệm thu giữa Người thuê và Chủ trọ.
+
+paths:
+  /api/v1/repair-tickets:
+    post:
+      tags:
+        - Repair Tickets
+      summary: Tạo phiếu báo cáo sự cố / sửa chữa kèm 1–5 ảnh hiện trường (BR-10)
+      description: |
+        Người thuê (`TENANT` `ACTIVE`) đang là **Chủ hợp đồng (`contract.tenantId`)** hoặc **Người ở cùng đang cư trú (`ContractResident.leftAt IS NULL`)** thuộc hợp đồng `ACTIVE` tạo phiếu báo cáo sự cố.
+        - **Sự cố phòng riêng (`roomId` có giá trị):** Người gọi phải đang cư trú hợp lệ tại hợp đồng `ACTIVE` của đúng `roomId`. Hệ thống tự suy ra `propertyId` từ `room.propertyId` (nếu client gửi kèm `propertyId` không khớp → trả `404 ROOM_NOT_FOUND`).
+        - **Sự cố khu vực chung (`roomId` bỏ trống/null, truyền `propertyId`):** Người gọi phải đang cư trú hợp lệ tại ít nhất 1 hợp đồng `ACTIVE` thuộc `propertyId` đó (ngược lại trả `404 PROPERTY_NOT_FOUND`).
+        - Bắt buộc đính kèm **1–5 ảnh hiện trường** (`attachments`, tối đa 5MB/ảnh, JPEG/PNG/WebP xác thực Magic Bytes) lưu vào `RepairAttachment` với `stage = 'INITIAL'`.
+        - Khởi tạo `status = 'OPEN'`, gửi thông báo `REPAIR_TICKET_CREATED` cho Chủ trọ và ghi `AuditLog`.
+      operationId: createRepairTicket
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CreateRepairTicketRequest'
+            encoding:
+              attachments:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '201':
+          description: Tạo phiếu báo cáo sự cố thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketDetail'
+              examples:
+                roomIncidentCreated:
+                  summary: Tạo sự cố phòng riêng
+                  value:
+                    id: "11111111-2222-4333-8444-555555555555"
+                    property:
+                      id: "33333333-4444-4555-8666-777777777777"
+                      name: "Nhà trọ Hoa Mai"
+                      address: "123 Đường D1, Phường Linh Trung, TP. Thủ Đức"
+                    room:
+                      id: "22222222-3333-4444-8555-666666666666"
+                      roomCode: "P.201"
+                    createdBy:
+                      id: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                      fullName: "Nguyễn Văn A"
+                      avatarUrl: null
+                    title: "Máy lạnh chảy nước liên tục"
+                    description: "Máy lạnh trong phòng P.201 bị chảy nước xuống tường và không làm lạnh từ tối qua."
+                    priority: "HIGH"
+                    status: "OPEN"
+                    resolutionPlan: null
+                    repairCost: null
+                    costBearer: null
+                    scheduledAt: null
+                    completedAt: null
+                    closedAt: null
+                    createdAt: "2026-11-24T05:00:00.000Z"
+                    canEscalateToComplaint: false
+                    autoCloseAt: null
+                    latestRejectionReason: null
+                    reopenHistory: []
+                    attachments:
+                      - id: "bbbb2222-cccc-4ddd-8eee-ffff22222222"
+                        fileUrl: "https://res.cloudinary.com/rentmate/image/upload/v1763960400/rentmate/repairs/33333333-4444-4555-8666-777777777777/11111111-2222-4333-8444-555555555555/initial_bbbb2222.webp"
+                        stage: "INITIAL"
+                        reason: null
+                        uploadedBy:
+                          id: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                          fullName: "Nguyễn Văn A"
+                          avatarUrl: null
+                    attachmentsByStage:
+                      INITIAL:
+                        - id: "bbbb2222-cccc-4ddd-8eee-ffff22222222"
+                          fileUrl: "https://res.cloudinary.com/rentmate/image/upload/v1763960400/rentmate/repairs/33333333-4444-4555-8666-777777777777/11111111-2222-4333-8444-555555555555/initial_bbbb2222.webp"
+                          stage: "INITIAL"
+                          reason: null
+                          uploadedBy:
+                            id: "aaaa1111-bbbb-4ccc-8ddd-eeee11111111"
+                            fullName: "Nguyễn Văn A"
+                            avatarUrl: null
+                      COMPLETION: []
+                      REOPEN_EVIDENCE: []
+        '400':
+          $ref: '#/components/responses/UploadOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RoomOrPropertyNotFound'
+        '413':
+          $ref: '#/components/responses/FileTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '502':
+          $ref: '#/components/responses/CloudinaryUploadFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - Repair Tickets
+      summary: Lấy danh sách phiếu sự cố theo quyền cư trú / sở hữu hiện tại
+      description: |
+        Trả về danh sách phiếu sự cố mà người dùng hiện tại được phép xem, sắp xếp mới nhất trước (`createdAt DESC, id DESC`):
+        - **`LANDLORD`:** Toàn bộ ticket thuộc các khu trọ mình sở hữu.
+        - **`TENANT`:** Chỉ các ticket thuộc phòng mà người dùng **hiện đang cư trú `ACTIVE`** (`contract.tenantId` hoặc `ContractResident.leftAt IS NULL`) HOẶC ticket khu vực chung (`roomId IS NULL`) thuộc khu trọ mà người dùng **hiện đang có ít nhất 1 hợp đồng `ACTIVE`**. Thành viên đã rời phòng / hết hợp đồng `ACTIVE` không còn thấy các ticket của phòng/khu trọ cũ (kể cả ticket do chính mình tạo trước đây).
+        - Nếu truyền `propertyId` hoặc `roomId` ngoài phạm vi quyền, danh sách trả về rỗng (`items: [], total: 0`) để chống lộ dữ liệu (Anti-IDOR).
+        - Tự động chạy lazy-check đóng tối đa 50 ticket `AWAITING_CONFIRMATION` quá hạn 5 ngày trong phạm vi trước khi lọc & đếm.
+      operationId: listRepairTickets
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Lọc theo trạng thái phiếu sự cố
+          schema:
+            $ref: '#/components/schemas/RepairTicketStatus'
+        - name: priority
+          in: query
+          required: false
+          description: Lọc theo mức độ ưu tiên
+          schema:
+            $ref: '#/components/schemas/RepairTicketPriority'
+        - name: propertyId
+          in: query
+          required: false
+          description: Lọc theo mã khu trọ (UUID)
+          schema:
+            type: string
+            format: uuid
+        - name: roomId
+          in: query
+          required: false
+          description: Lọc theo mã phòng trọ (UUID)
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          required: false
+          description: Số thứ tự trang (từ 1 đến 10000, mặc định 1)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 10000
+            default: 1
+        - name: limit
+          in: query
+          required: false
+          description: Số lượng bản ghi mỗi trang (1..50, mặc định 20). Ưu tiên `limit` nếu truyền kèm `pageSize`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+        - name: pageSize
+          in: query
+          required: false
+          description: Alias tương thích ngược cho `limit` (1..50)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+      responses:
+        '200':
+          description: Lấy danh sách phiếu sự cố thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedRepairTicketsResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/repair-tickets/{ticketId}:
+    get:
+      tags:
+        - Repair Tickets
+      summary: Xem chi tiết phiếu sự cố, ảnh theo giai đoạn và cờ 72h
+      description: |
+        Trả về chi tiết đầy đủ của phiếu sự cố gồm thông tin khu trọ/phòng, người tạo, phương án xử lý, chi phí sửa chữa,
+        danh sách ảnh đính kèm (dạng phẳng và nhóm theo `stage`: `INITIAL`, `COMPLETION`, `REOPEN_EVIDENCE`),
+        lịch sử mở lại (`reopenHistory`, `latestRejectionReason`), cờ `canEscalateToComplaint` (luật 72h) và mốc `autoCloseAt` (luật 5 ngày).
+        - Quyền xem: `LANDLORD` sở hữu khu trọ; hoặc `TENANT` đang cư trú `ACTIVE` tại đúng `roomId` (nếu sự cố phòng riêng) / đang có hợp đồng `ACTIVE` tại `propertyId` (nếu sự cố khu vực chung). Thành viên đã rời phòng hoặc hết hợp đồng `ACTIVE` nhận `404 REPAIR_TICKET_NOT_FOUND` (Anti-IDOR).
+        - Nếu ticket đang `AWAITING_CONFIRMATION` và đã quá 5 ngày kể từ `completedAt`, hệ thống tự động đóng (`CLOSED`) trước khi trả kết quả.
+      operationId: getRepairTicketDetail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TicketIdParam'
+      responses:
+        '200':
+          description: Lấy chi tiết phiếu sự cố thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketDetail'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RepairTicketNotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/repair-tickets/{ticketId}/accept:
+    patch:
+      tags:
+        - Repair Tickets
+      summary: Chủ trọ tiếp nhận sự cố (OPEN → IN_PROGRESS)
+      description: |
+        Chỉ `LANDLORD` sở hữu khu trọ chứa ticket mới có quyền thực hiện (`404 REPAIR_TICKET_NOT_FOUND` nếu của chủ trọ khác; `403 FORBIDDEN` với `TENANT`/`ADMIN`).
+        - Chỉ hợp lệ khi `status === 'OPEN'` (khóa hàng `repair_tickets FOR UPDATE` và kiểm tra lại sau khóa).
+        - `scheduledAt` bắt buộc ISO-8601 có timezone hợp lệ và `>= now - 5 phút` (tránh lệch đồng hồ / bấm "sửa ngay").
+        - Lưu `resolutionPlan`, `scheduledAt`, chuyển `status = 'IN_PROGRESS'`, gửi `Notification` (`REPAIR_TICKET_ACCEPTED`) cho toàn bộ thành viên đang cư trú `ACTIVE` trong phòng (nếu `roomId != null`) hoặc `createdById` đang cư trú `ACTIVE` tại khu trọ (nếu `roomId = null`), và ghi `AuditLog`.
+      operationId: acceptRepairTicket
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TicketIdParam'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AcceptRepairTicketRequest'
+            examples:
+              scheduleTechnician:
+                summary: Tiếp nhận và hẹn thợ sửa chữa
+                value:
+                  resolutionPlan: "Gọi thợ điện lạnh đến vệ sinh dàn lạnh, thông ống thoát nước và kiểm tra gas."
+                  scheduledAt: "2026-11-25T09:00:00.000Z"
+      responses:
+        '200':
+          description: Tiếp nhận sự cố thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketDetail'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RepairTicketNotFound'
+        '409':
+          $ref: '#/components/responses/RepairTicketStatusConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/repair-tickets/{ticketId}/complete:
+    patch:
+      tags:
+        - Repair Tickets
+      summary: Chủ trọ báo hoàn tất sửa chữa kèm 1–5 ảnh kết quả (IN_PROGRESS → AWAITING_CONFIRMATION)
+      description: |
+        Chỉ `LANDLORD` sở hữu khu trọ mới có quyền thực hiện (`404 REPAIR_TICKET_NOT_FOUND` nếu của chủ trọ khác).
+        - Chỉ hợp lệ khi `status === 'IN_PROGRESS'`.
+        - Bắt buộc tải lên **1–5 ảnh kết quả sửa chữa** (`attachments`, `stage = 'COMPLETION'`, tối đa 5MB/ảnh, JPEG/PNG/WebP xác thực Magic Bytes).
+        - Tùy chọn `repairCost` (`>= 0`, tối đa `999999999999.99`) và `costBearer` (`LANDLORD | TENANT`). Bắt buộc đi cặp: truyền 1 thiếu 1 trả `400 VALIDATION_ERROR`.
+        - Cập nhật `status = 'AWAITING_CONFIRMATION'`, `completedAt = now()`, gửi `Notification` (`REPAIR_TICKET_COMPLETED`, hạn nghiệm thu 5 ngày) cho toàn bộ thành viên đang cư trú `ACTIVE` trong phòng (nếu `roomId != null`) hoặc `createdById` đang cư trú `ACTIVE` tại khu trọ (nếu `roomId = null`), và ghi `AuditLog`.
+        - Nếu transaction DB lỗi hoặc trạng thái bị thay đổi song song, toàn bộ ảnh vừa upload lên Cloudinary sẽ bị xóa rollback.
+      operationId: completeRepairTicket
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TicketIdParam'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/CompleteRepairTicketRequest'
+            encoding:
+              attachments:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '200':
+          description: Báo hoàn tất sửa chữa thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketDetail'
+        '400':
+          $ref: '#/components/responses/UploadOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RepairTicketNotFound'
+        '409':
+          $ref: '#/components/responses/RepairTicketStatusConflict'
+        '413':
+          $ref: '#/components/responses/FileTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '502':
+          $ref: '#/components/responses/CloudinaryUploadFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/repair-tickets/{ticketId}/confirm-completion:
+    patch:
+      tags:
+        - Repair Tickets
+      summary: Người thuê nghiệm thu đạt và đóng sự cố (AWAITING_CONFIRMATION → CLOSED)
+      description: |
+        Quyền nghiệm thu (bắt buộc kiểm tra lại **sau khi** khóa `repair_tickets FOR UPDATE`):
+        - **Sự cố phòng riêng (`roomId != null`):** Mọi thành viên đang cư trú `ACTIVE` theo hợp đồng `ACTIVE` hiện tại của phòng (**Chủ hợp đồng `contract.tenantId` + tất cả `ContractResident` `leftAt IS NULL`**).
+        - **Sự cố khu vực chung (`roomId = null`):** Chỉ **`createdById` VÀ đang còn cư trú `ACTIVE`** tại ít nhất 1 hợp đồng thuộc `propertyId` đó.
+        - Chủ trọ bị chặn tuyệt đối (`403 FORBIDDEN`); người thuê không có quyền hoặc đã rời phòng/hết hợp đồng `ACTIVE` nhận `404 REPAIR_TICKET_NOT_FOUND` (Anti-IDOR).
+        - Kiểm tra luật tự đóng 5 ngày dưới khóa `FOR UPDATE`:
+          - Nếu đã quá 5 ngày kể từ `completedAt`: hệ thống commit trạng thái tự động đóng (`CLOSED`, `REPAIR_TICKET_AUTO_CLOSED`) và trả `409 REPAIR_TICKET_AUTO_CLOSED`.
+          - Nếu còn trong hạn 5 ngày và `status === 'AWAITING_CONFIRMATION'`: chuyển `status = 'CLOSED'`, `closedAt = now()`, gửi `Notification` (`REPAIR_TICKET_CLOSED`) cho **Chủ trọ** (`/landlord/repair-tickets/{ticketId}`) và **các thành viên cư trú `ACTIVE` khác trong phòng** (nếu `roomId != null`, loại trừ người thao tác, `/repair-tickets/{ticketId}`), và ghi `AuditLog` (`REPAIR_TICKET_CONFIRMED`).
+      operationId: confirmRepairTicketCompletion
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TicketIdParam'
+      responses:
+        '200':
+          description: Nghiệm thu đạt và đóng phiếu sự cố thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketDetail'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RepairTicketNotFound'
+        '409':
+          $ref: '#/components/responses/RepairTicketStatusConflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/repair-tickets/{ticketId}/reject-completion:
+    patch:
+      tags:
+        - Repair Tickets
+      summary: Người thuê nghiệm thu chưa đạt và mở lại sự cố (AWAITING_CONFIRMATION → IN_PROGRESS)
+      description: |
+        Quyền nghiệm thu (bắt buộc kiểm tra lại **sau khi** khóa `repair_tickets FOR UPDATE`):
+        - **Sự cố phòng riêng (`roomId != null`):** Mọi thành viên đang cư trú `ACTIVE` theo hợp đồng `ACTIVE` hiện tại của phòng (**Chủ hợp đồng `contract.tenantId` + tất cả `ContractResident` `leftAt IS NULL`**).
+        - **Sự cố khu vực chung (`roomId = null`):** Chỉ **`createdById` VÀ đang còn cư trú `ACTIVE`** tại ít nhất 1 hợp đồng thuộc `propertyId` đó.
+        - Chủ trọ bị chặn tuyệt đối (`403 FORBIDDEN`); người thuê không có quyền hoặc đã rời phòng/hết hợp đồng `ACTIVE` nhận `404 REPAIR_TICKET_NOT_FOUND` (Anti-IDOR).
+        - Hỗ trợ cả `multipart/form-data` (kèm `reason` và **0–3 ảnh đối chứng** `attachments`, `stage = 'REOPEN_EVIDENCE'`) lẫn `application/json` (chỉ truyền `reason` khi không có ảnh). Không giới hạn số lần mở lại.
+        - Bắt buộc `reason` (10–1000 ký tự). Không tạo `RepairAttachment` ảo khi 0 ảnh; khi có 1–3 ảnh thì lưu `reason` vào từng `RepairAttachment`, đồng thời luôn lưu `reason` trong `AuditLog` (`REPAIR_TICKET_REOPENED`) và `Notification.payload`.
+        - Kiểm tra luật tự đóng 5 ngày dưới khóa `FOR UPDATE` (nếu đã quá 5 ngày → commit tự động đóng, rollback ảnh vừa upload nếu có, trả `409 REPAIR_TICKET_AUTO_CLOSED`).
+        - Nếu hợp lệ: chuyển ngược về `status = 'IN_PROGRESS'`, đặt `completedAt = null`, `repairCost = null`, `costBearer = null` (lưu giá trị cũ trong `AuditLog.oldData`), gửi `Notification` (`REPAIR_TICKET_REOPENED`) cho Chủ trọ yêu cầu khắc phục lại và ghi `AuditLog`.
+      operationId: rejectRepairTicketCompletion
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TicketIdParam'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/RejectRepairCompletionMultipartRequest'
+            encoding:
+              attachments:
+                contentType: image/jpeg, image/png, image/webp
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RejectRepairCompletionJsonRequest'
+            examples:
+              rejectWithoutImages:
+                summary: Nghiệm thu chưa đạt không kèm ảnh
+                value:
+                  reason: "Sau khi chạy thử 30 phút máy lạnh vẫn còn nhỏ nước xuống sàn nhà."
+      responses:
+        '200':
+          description: Từ chối nghiệm thu và mở lại phiếu sự cố thành công
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairTicketDetail'
+        '400':
+          $ref: '#/components/responses/UploadOrValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/RepairTicketNotFound'
+        '409':
+          $ref: '#/components/responses/RepairTicketStatusConflict'
+        '413':
+          $ref: '#/components/responses/FileTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '502':
+          $ref: '#/components/responses/CloudinaryUploadFailed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "JWT Access Token cấp từ API Login/Refresh gửi qua header `Authorization: Bearer <token>`."
+
+  parameters:
+    TicketIdParam:
+      name: ticketId
+      in: path
+      required: true
+      description: Mã định danh UUID của phiếu báo cáo sự cố
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    RepairTicketStatus:
+      type: string
+      enum:
+        - OPEN
+        - IN_PROGRESS
+        - AWAITING_CONFIRMATION
+        - CLOSED
+
+    RepairTicketPriority:
+      type: string
+      enum:
+        - LOW
+        - MEDIUM
+        - HIGH
+        - URGENT
+
+    RepairCostBearer:
+      type: string
+      enum:
+        - LANDLORD
+        - TENANT
+
+    RepairAttachmentStage:
+      type: string
+      enum:
+        - INITIAL
+        - COMPLETION
+        - REOPEN_EVIDENCE
+
+    CreateRepairTicketRequest:
+      type: object
+      required:
+        - title
+        - description
+        - attachments
+      properties:
+        roomId:
+          type: string
+          format: uuid
+          description: UUID phòng đang thuê (bỏ trống hoặc không gửi nếu báo sự cố khu vực chung).
+        propertyId:
+          type: string
+          format: uuid
+          description: UUID khu trọ (bắt buộc khi `roomId` bỏ trống; nếu có `roomId`, Backend tự suy ra từ `room.propertyId` và kiểm tra khớp nếu client vẫn gửi).
+        title:
+          type: string
+          minLength: 5
+          maxLength: 200
+          description: Tiêu đề ngắn gọn mô tả sự cố
+          example: "Máy lạnh chảy nước liên tục"
+        description:
+          type: string
+          minLength: 10
+          maxLength: 2000
+          description: Mô tả chi tiết tình trạng hiện trường
+          example: "Máy lạnh trong phòng P.201 bị chảy nước xuống tường và không làm lạnh từ tối qua."
+        priority:
+          $ref: '#/components/schemas/RepairTicketPriority'
+          default: MEDIUM
+        attachments:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            type: string
+            format: binary
+          description: 1–5 ảnh hiện trường (JPEG/PNG/WebP, mỗi file <= 5MB).
+
+    AcceptRepairTicketRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - resolutionPlan
+        - scheduledAt
+      properties:
+        resolutionPlan:
+          type: string
+          minLength: 5
+          maxLength: 1000
+          description: Phương án xử lý sự cố của Chủ trọ
+          example: "Gọi thợ điện lạnh đến vệ sinh dàn lạnh và thông ống thoát nước."
+        scheduledAt:
+          type: string
+          format: date-time
+          description: "Thời điểm dự kiến sửa chữa (ISO-8601 có timezone, bắt buộc `>= now - 5 phút` để tránh lệch đồng hồ hoặc bấm sửa ngay)."
+          example: "2026-11-25T09:00:00.000Z"
+
+    CompleteRepairTicketRequest:
+      type: object
+      required:
+        - attachments
+      properties:
+        attachments:
+          type: array
+          minItems: 1
+          maxItems: 5
+          items:
+            type: string
+            format: binary
+          description: 1–5 ảnh kết quả sau sửa chữa (JPEG/PNG/WebP, mỗi file <= 5MB).
+        repairCost:
+          type: number
+          minimum: 0
+          maximum: 999999999999.99
+          description: Chi phí sửa chữa thực tế (VND, tùy chọn). Nếu cung cấp (kể cả 0) thì bắt buộc cung cấp `costBearer`.
+          example: 350000
+        costBearer:
+          $ref: '#/components/schemas/RepairCostBearer'
+          description: Bên chịu chi phí sửa chữa (`LANDLORD` hoặc `TENANT`). Bắt buộc đi cặp với `repairCost`.
+
+    RejectRepairCompletionMultipartRequest:
+      type: object
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: Lý do nghiệm thu chưa đạt
+          example: "Sau khi chạy thử 30 phút máy lạnh vẫn còn nhỏ nước xuống sàn nhà."
+        attachments:
+          type: array
+          minItems: 0
+          maxItems: 3
+          items:
+            type: string
+            format: binary
+          description: 0–3 ảnh đối chứng lỗi còn tồn tại (tùy chọn, JPEG/PNG/WebP, mỗi file <= 5MB).
+
+    RejectRepairCompletionJsonRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - reason
+      properties:
+        reason:
+          type: string
+          minLength: 10
+          maxLength: 1000
+          description: Lý do nghiệm thu chưa đạt
+          example: "Sau khi chạy thử 30 phút máy lạnh vẫn còn nhỏ nước xuống sàn nhà."
+
+    UserSummary:
+      type: object
+      required:
+        - id
+        - fullName
+        - avatarUrl
+      properties:
+        id:
+          type: string
+          format: uuid
+        fullName:
+          type: string
+        avatarUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+
+    RepairPropertySummary:
+      type: object
+      required:
+        - id
+        - name
+        - address
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        address:
+          type: string
+
+    RepairRoomSummary:
+      type: object
+      required:
+        - id
+        - roomCode
+      properties:
+        id:
+          type: string
+          format: uuid
+        roomCode:
+          type: string
+
+    RepairAttachmentItem:
+      type: object
+      required:
+        - id
+        - fileUrl
+        - stage
+        - reason
+        - uploadedBy
+      properties:
+        id:
+          type: string
+          format: uuid
+        fileUrl:
+          type: string
+          format: uri
+        stage:
+          $ref: '#/components/schemas/RepairAttachmentStage'
+        reason:
+          type:
+            - string
+            - "null"
+        uploadedBy:
+          $ref: '#/components/schemas/UserSummary'
+
+    RepairAttachmentsByStage:
+      type: object
+      required:
+        - INITIAL
+        - COMPLETION
+        - REOPEN_EVIDENCE
+      properties:
+        INITIAL:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairAttachmentItem'
+        COMPLETION:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairAttachmentItem'
+        REOPEN_EVIDENCE:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairAttachmentItem'
+
+    RepairReopenHistoryItem:
+      type: object
+      required:
+        - actorId
+        - reason
+        - reopenedAt
+        - attachmentCount
+      properties:
+        actorId:
+          type:
+            - string
+            - "null"
+          format: uuid
+        reason:
+          type: string
+        reopenedAt:
+          type: string
+          format: date-time
+        attachmentCount:
+          type: integer
+          minimum: 0
+
+    RepairTicketListItem:
+      type: object
+      required:
+        - id
+        - property
+        - room
+        - createdBy
+        - title
+        - priority
+        - status
+        - scheduledAt
+        - completedAt
+        - closedAt
+        - createdAt
+        - canEscalateToComplaint
+        - autoCloseAt
+        - attachmentCount
+        - thumbnailUrl
+      properties:
+        id:
+          type: string
+          format: uuid
+        property:
+          $ref: '#/components/schemas/RepairPropertySummary'
+        room:
+          oneOf:
+            - $ref: '#/components/schemas/RepairRoomSummary'
+            - type: "null"
+        createdBy:
+          $ref: '#/components/schemas/UserSummary'
+        title:
+          type: string
+        priority:
+          $ref: '#/components/schemas/RepairTicketPriority'
+        status:
+          $ref: '#/components/schemas/RepairTicketStatus'
+        scheduledAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        completedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        closedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        canEscalateToComplaint:
+          type: boolean
+          description: "`true` khi ticket vẫn đang `OPEN` và đã quá 72 giờ kể từ `createdAt` (BP-08)."
+        autoCloseAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Mốc tự động đóng (`completedAt + 5 ngày`) khi ticket đang ở `AWAITING_CONFIRMATION`; ngược lại `null`.
+        attachmentCount:
+          type: integer
+          minimum: 0
+        thumbnailUrl:
+          type:
+            - string
+            - "null"
+          format: uri
+          description: Ảnh đại diện đầu tiên (ưu tiên `INITIAL`) của phiếu sự cố.
+
+    RepairTicketDetail:
+      type: object
+      required:
+        - id
+        - property
+        - room
+        - createdBy
+        - title
+        - description
+        - priority
+        - status
+        - resolutionPlan
+        - repairCost
+        - costBearer
+        - scheduledAt
+        - completedAt
+        - closedAt
+        - createdAt
+        - canEscalateToComplaint
+        - autoCloseAt
+        - latestRejectionReason
+        - reopenHistory
+        - attachments
+        - attachmentsByStage
+      properties:
+        id:
+          type: string
+          format: uuid
+        property:
+          $ref: '#/components/schemas/RepairPropertySummary'
+        room:
+          oneOf:
+            - $ref: '#/components/schemas/RepairRoomSummary'
+            - type: "null"
+        createdBy:
+          $ref: '#/components/schemas/UserSummary'
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          $ref: '#/components/schemas/RepairTicketPriority'
+        status:
+          $ref: '#/components/schemas/RepairTicketStatus'
+        resolutionPlan:
+          type:
+            - string
+            - "null"
+        repairCost:
+          type:
+            - number
+            - "null"
+        costBearer:
+          oneOf:
+            - $ref: '#/components/schemas/RepairCostBearer'
+            - type: "null"
+        scheduledAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        completedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        closedAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        canEscalateToComplaint:
+          type: boolean
+          description: "`true` khi ticket vẫn đang `OPEN` và đã quá 72 giờ kể từ `createdAt` (BP-08)."
+        autoCloseAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+          description: Mốc tự động đóng (`completedAt + 5 ngày`) khi ticket đang ở `AWAITING_CONFIRMATION`; ngược lại `null`.
+        latestRejectionReason:
+          type:
+            - string
+            - "null"
+          description: Lý do mở lại gần nhất (trích từ lịch sử `REPAIR_TICKET_REOPENED` trong `AuditLog`), luôn có giá trị kể cả khi lần từ chối không đính kèm ảnh.
+        reopenHistory:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairReopenHistoryItem'
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairAttachmentItem'
+        attachmentsByStage:
+          $ref: '#/components/schemas/RepairAttachmentsByStage'
+
+    PaginatedRepairTicketsResponse:
+      type: object
+      required:
+        - items
+        - total
+        - page
+        - limit
+        - totalPages
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RepairTicketListItem'
+        total:
+          type: integer
+          minimum: 0
+          example: 5
+        page:
+          type: integer
+          minimum: 1
+          example: 1
+        limit:
+          type: integer
+          minimum: 1
+          example: 20
+        totalPages:
+          type: integer
+          minimum: 0
+          example: 1
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          enum:
+            - false
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu đầu vào không hợp lệ"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        traceId:
+          type: string
+          format: uuid
+          example: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+  responses:
+    ValidationError:
+      description: Dữ liệu đầu vào hoặc tham số truy vấn không hợp lệ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu đầu vào không hợp lệ"
+            errors:
+              ticketId:
+                - "Mã phiếu sự cố phải là UUID hợp lệ"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f42"
+
+    UploadOrValidationError:
+      description: Dữ liệu không hợp lệ, thiếu ảnh bắt buộc hoặc vượt quá giới hạn số lượng ảnh
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            validationError:
+              summary: Lỗi validate trường dữ liệu
+              value:
+                success: false
+                code: "VALIDATION_ERROR"
+                message: "Dữ liệu đầu vào không hợp lệ"
+                errors:
+                  costBearer:
+                    - "Vui lòng chọn bên chịu chi phí (LANDLORD hoặc TENANT) khi nhập chi phí sửa chữa"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f43"
+            attachmentsRequired:
+              summary: Thiếu ảnh bắt buộc
+              value:
+                success: false
+                code: "ATTACHMENTS_REQUIRED"
+                message: "Vui lòng đính kèm ít nhất 1 ảnh hợp lệ"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f44"
+            attachmentLimitExceeded:
+              summary: Vượt quá số lượng ảnh tối đa
+              value:
+                success: false
+                code: "ATTACHMENT_LIMIT_EXCEEDED"
+                message: "Số lượng ảnh tải lên vượt quá giới hạn tối đa cho phép"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f45"
+
+    Unauthorized:
+      description: Chưa xác thực (thiếu, sai hoặc hết hạn Bearer JWT Token)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNAUTHORIZED"
+            message: "Cần access token"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f46"
+
+    Forbidden:
+      description: Tài khoản bị khóa hoặc vai trò không được phép gọi endpoint này
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            forbiddenRole:
+              value:
+                success: false
+                code: "FORBIDDEN"
+                message: "Bạn không có quyền thực hiện thao tác này"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f47"
+            accountLocked:
+              value:
+                success: false
+                code: "ACCOUNT_LOCKED"
+                message: "Tài khoản đã bị khóa hoặc chưa kích hoạt"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f48"
+
+    RoomOrPropertyNotFound:
+      description: Phòng hoặc khu trọ không tồn tại, hoặc người thuê không có hợp đồng ACTIVE tại đây (Anti-IDOR)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            roomNotFound:
+              value:
+                success: false
+                code: "ROOM_NOT_FOUND"
+                message: "Phòng trọ không tồn tại hoặc bạn không có hợp đồng đang hiệu lực tại phòng này"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f49"
+            propertyNotFound:
+              value:
+                success: false
+                code: "PROPERTY_NOT_FOUND"
+                message: "Khu trọ không tồn tại hoặc bạn không có hợp đồng đang hiệu lực tại khu trọ này"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f4a"
+
+    RepairTicketNotFound:
+      description: Phiếu sự cố không tồn tại hoặc người gọi không còn quyền truy cập (Anti-IDOR)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "REPAIR_TICKET_NOT_FOUND"
+            message: "Phiếu sự cố không tồn tại hoặc bạn không có quyền truy cập"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f4b"
+
+    RepairTicketStatusConflict:
+      description: Xung đột trạng thái phiếu sự cố hoặc đã tự động đóng sau 5 ngày
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          examples:
+            invalidStatus:
+              value:
+                success: false
+                code: "REPAIR_TICKET_INVALID_STATUS"
+                message: "Trạng thái hiện tại của phiếu sự cố không cho phép thực hiện thao tác này"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f4c"
+            alreadyClosed:
+              value:
+                success: false
+                code: "REPAIR_TICKET_ALREADY_CLOSED"
+                message: "Phiếu sự cố đã được đóng trước đó"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f4d"
+            autoClosed:
+              value:
+                success: false
+                code: "REPAIR_TICKET_AUTO_CLOSED"
+                message: "Phiếu sự cố đã tự động đóng sau 5 ngày kể từ khi hoàn tất sửa chữa"
+                traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f4e"
+
+    FileTooLarge:
+      description: Có file ảnh vượt quá giới hạn 5MB
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "FILE_TOO_LARGE"
+            message: "Dung lượng file ảnh vượt quá giới hạn tối đa 5MB"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f4f"
+
+    UnsupportedMediaType:
+      description: Định dạng file hoặc Magic Bytes không hợp lệ (chỉ hỗ trợ JPEG, PNG, WebP)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "UNSUPPORTED_MEDIA_TYPE"
+            message: "Nội dung file không đúng định dạng ảnh hợp lệ (chỉ hỗ trợ JPEG, PNG, WebP)"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f50"
+
+    CloudinaryUploadFailed:
+      description: Tải ảnh lên Cloudinary thất bại (đã rollback các ảnh upload thành công trước đó)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "CLOUDINARY_UPLOAD_FAILED"
+            message: "Không thể tải ảnh đính kèm lên hệ thống lưu trữ, vui lòng thử lại"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f51"
+
+    InternalError:
+      description: Lỗi máy chủ nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Lỗi hệ thống"
+            traceId: "d3b07384-d113-469b-bb9b-b0b3d8705f52"
