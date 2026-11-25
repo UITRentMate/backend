@@ -5,6 +5,7 @@ import { afterEach, describe, test } from 'node:test';
 import bcrypt from 'bcrypt';
 import express from 'express';
 
+import { Prisma } from '@prisma/client';
 import { app } from '../../src/app';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { newPasswordResetToken, sha256Hex } from '../../src/modules/auth/auth.security';
@@ -203,8 +204,18 @@ describe('POST /api/v1/auth/reset-password', () => {
       let userUpdated = false;
       let sessionRevoked = false;
       let auditCreated = false;
+      let bcryptHashCalls = 0;
+      let txCalls = 0;
+      const originalHash = bcrypt.hash;
 
-      stub(prisma, '$transaction', async (run: any) => run(prisma));
+      stub(bcrypt as any, 'hash', async (...args: Parameters<typeof bcrypt.hash>) => {
+        bcryptHashCalls += 1;
+        return originalHash(...args);
+      });
+      stub(prisma, '$transaction', async (run: any) => {
+        txCalls += 1;
+        return run(prisma);
+      });
       stub((prisma as any).passwordResetToken, 'findUnique', async () => scenario.record);
       stub((prisma as any).passwordResetToken, 'updateMany', async () => ({
         count: scenario.updateManyCount ?? 0,
@@ -236,7 +247,52 @@ describe('POST /api/v1/auth/reset-password', () => {
       assert.equal(userUpdated, false, scenario.name);
       assert.equal(sessionRevoked, false, scenario.name);
       assert.equal(auditCreated, false, scenario.name);
+
+      if (scenario.name === 'concurrent updateMany count === 0') {
+        assert.equal(bcryptHashCalls, 1, scenario.name);
+        assert.equal(txCalls, 1, scenario.name);
+      } else {
+        assert.equal(bcryptHashCalls, 0, `${scenario.name} must not call bcrypt.hash`);
+        assert.equal(txCalls, 0, `${scenario.name} must not open transaction`);
+      }
     }
+  });
+
+  test('thực thi giao dịch ở mức Serializable và tự động retry khi gặp lỗi P2034', async () => {
+    const { rawToken } = newPasswordResetToken();
+    const userId = '550e8400-e29b-41d4-a716-446655440077';
+    const resetTokenId = '550e8400-e29b-41d4-a716-446655440177';
+    let attempts = 0;
+
+    stub(prisma, '$transaction', async (run: any, options: any) => {
+      assert.equal(options?.isolationLevel, Prisma.TransactionIsolationLevel.Serializable);
+      attempts += 1;
+      if (attempts === 1) {
+        throw { code: 'P2034' };
+      }
+      return run(prisma);
+    });
+    stub((prisma as any).passwordResetToken, 'findUnique', async () => ({
+      id: resetTokenId,
+      userId,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      usedAt: null,
+      user: { id: userId, accountStatus: 'ACTIVE' },
+    }));
+    stub((prisma as any).passwordResetToken, 'updateMany', async () => ({ count: 1 }));
+    stub(prisma.user, 'update', async () => ({ id: userId }));
+    stub((prisma as any).refreshSession, 'updateMany', async () => ({ count: 1 }));
+    stub((prisma as any).auditLog, 'create', async (args: any) => ({ id: 'audit-retry', ...args.data }));
+
+    const { response, body } = await sendResetRequest(app, {
+      token: rawToken,
+      newPassword: 'RetryPassword@123',
+      confirmNewPassword: 'RetryPassword@123',
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(body.success, true);
+    assert.equal(attempts, 2);
   });
 
   test('happy path: hash SHA-256 token, bcrypt 12 rounds, tiêu thụ token, thu hồi refresh sessions, ghi audit log không lộ bí mật và xóa cookie', async () => {

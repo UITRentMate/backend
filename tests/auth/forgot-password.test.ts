@@ -212,6 +212,7 @@ describe('POST /api/v1/auth/forgot-password', () => {
         accountStatus: 'ACTIVE',
       } as any;
     });
+    stub(prisma as any, '$queryRaw', async () => [{ id: '550e8400-e29b-41d4-a716-446655440001' }]);
     stub((prisma as any).passwordResetToken, 'findFirst', async () => null);
     stub(prisma, '$transaction', async (run: any) => run(prisma));
     stub((prisma as any).passwordResetToken, 'updateMany', async (args: any) => {
@@ -282,6 +283,7 @@ describe('POST /api/v1/auth/forgot-password', () => {
       fullName: 'Cooldown User',
       accountStatus: 'ACTIVE',
     }) as any);
+    stub(prisma as any, '$queryRaw', async () => [{ id: '550e8400-e29b-41d4-a716-446655440002' }]);
     stub((prisma as any).passwordResetToken, 'findFirst', async () => ({
       createdAt: latestCreatedAt,
     }));
@@ -312,18 +314,93 @@ describe('POST /api/v1/auth/forgot-password', () => {
     assert.equal(sentEmails.length, 1);
   });
 
-  test('lỗi SMTP thu hồi token vừa tạo, log không lộ rawToken/email/credentials và trả 500 INTERNAL_ERROR', async () => {
+  test('2 request forgot-password đồng thời được tuần tự hóa bằng row lock, chỉ tạo 1 token và gửi 1 email', async () => {
+    const sentEmails: SendPasswordResetEmailParams[] = [];
+    const tokens: Array<{ id: string; createdAt: Date; usedAt: Date | null }> = [];
+    let lockAcquiredCount = 0;
+    let lockQueue = Promise.resolve();
+
+    const mockSender: EmailSender = {
+      async sendPasswordResetEmail(params) {
+        sentEmails.push(params);
+      },
+    };
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: '550e8400-e29b-41d4-a716-446655440004',
+      email: 'race-forgot@example.com',
+      fullName: 'Race Forgot User',
+      accountStatus: 'ACTIVE',
+    }) as any);
+
+    stub(prisma, '$transaction', async (run: any) => {
+      const previous = lockQueue;
+      let release!: () => void;
+      lockQueue = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        // Giả lập delay trước khi kiểm tra cooldown để request thứ 2 buộc phải chờ row lock
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return await run(prisma);
+      } finally {
+        release();
+      }
+    });
+
+    stub(prisma as any, '$queryRaw', async () => {
+      lockAcquiredCount += 1;
+      return [{ id: '550e8400-e29b-41d4-a716-446655440004' }];
+    });
+    stub((prisma as any).passwordResetToken, 'findFirst', async () => {
+      const latest = tokens.at(-1);
+      return latest ? { createdAt: latest.createdAt } : null;
+    });
+    stub((prisma as any).passwordResetToken, 'updateMany', async () => {
+      for (const token of tokens) {
+        if (token.usedAt === null) token.usedAt = new Date();
+      }
+      return { count: tokens.length };
+    });
+    stub((prisma as any).passwordResetToken, 'create', async (args: any) => {
+      const created = { id: `race-token-${tokens.length + 1}`, createdAt: new Date(), usedAt: null };
+      tokens.push(created);
+      return { id: created.id, expiresAt: args.data.expiresAt };
+    });
+
+    const testApp = createAppWithEmailSender(mockSender);
+    const [res1, res2] = await Promise.all([
+      sendRequest(testApp, '/api/v1/auth/forgot-password', { email: 'race-forgot@example.com' }),
+      sendRequest(testApp, '/api/v1/auth/forgot-password', { email: 'race-forgot@example.com' }),
+    ]);
+
+    assert.equal(res1.response.status, 200);
+    assert.equal(res2.response.status, 200);
+    assert.deepEqual(res1.body, FORGOT_PASSWORD_NEUTRAL_RESPONSE);
+    assert.deepEqual(res2.body, FORGOT_PASSWORD_NEUTRAL_RESPONSE);
+    assert.equal(lockAcquiredCount, 2);
+    assert.equal(tokens.length, 1);
+    assert.equal(sentEmails.length, 1);
+  });
+
+  test('lỗi SMTP xóa token vừa tạo để không khóa cooldown, log an toàn trả 500 và retry ngay lập tức (< 60s) thành công 200', async () => {
     let capturedResetUrl = '';
-    let revokedWhere: any;
-    let revokedData: any;
+    let deletedWhere: any;
+    let shouldFailSend = true;
+    const storedTokens: Array<{ id: string; createdAt: Date; usedAt: Date | null }> = [];
+    const sentEmails: SendPasswordResetEmailParams[] = [];
     const errorLogs: string[] = [];
 
     const mockSender: EmailSender = {
       async sendPasswordResetEmail(params) {
-        capturedResetUrl = params.resetUrl;
-        throw new Error(
-          `SMTP auth failed user=secret_smtp_user pass=super_secret_pass to=${params.to} url=${params.resetUrl}`,
-        );
+        if (shouldFailSend) {
+          capturedResetUrl = params.resetUrl;
+          throw new Error(
+            `SMTP auth failed user=secret_smtp_user pass=super_secret_pass to=${params.to} url=${params.resetUrl}`,
+          );
+        }
+        sentEmails.push(params);
       },
     };
 
@@ -336,19 +413,33 @@ describe('POST /api/v1/auth/forgot-password', () => {
       fullName: 'SMTP Fail User',
       accountStatus: 'ACTIVE',
     }) as any);
-    stub((prisma as any).passwordResetToken, 'findFirst', async () => null);
+    stub(prisma as any, '$queryRaw', async () => [{ id: '550e8400-e29b-41d4-a716-446655440003' }]);
+    stub((prisma as any).passwordResetToken, 'findFirst', async () => {
+      const latest = storedTokens.at(-1);
+      return latest ? { createdAt: latest.createdAt } : null;
+    });
     stub(prisma, '$transaction', async (run: any) => run(prisma));
-    stub((prisma as any).passwordResetToken, 'updateMany', async (args: any) => {
-      if (args.where?.id === 'issued-token-id') {
-        revokedWhere = args.where;
-        revokedData = args.data;
+    stub((prisma as any).passwordResetToken, 'updateMany', async () => ({ count: 0 }));
+    stub((prisma as any).passwordResetToken, 'create', async (args: any) => {
+      const row = {
+        id: `issued-token-${storedTokens.length + 1}`,
+        createdAt: new Date(),
+        usedAt: null,
+      };
+      storedTokens.push(row);
+      return {
+        id: row.id,
+        expiresAt: args.data.expiresAt,
+      };
+    });
+    stub((prisma as any).passwordResetToken, 'deleteMany', async (args: any) => {
+      deletedWhere = args.where;
+      const idx = storedTokens.findIndex((row) => row.id === args.where?.id);
+      if (idx !== -1) {
+        storedTokens.splice(idx, 1);
       }
       return { count: 1 };
     });
-    stub((prisma as any).passwordResetToken, 'create', async (args: any) => ({
-      id: 'issued-token-id',
-      expiresAt: args.data.expiresAt,
-    }));
 
     const testApp = createAppWithEmailSender(mockSender);
     const { response, body, text } = await sendRequest(testApp, '/api/v1/auth/forgot-password', {
@@ -361,8 +452,8 @@ describe('POST /api/v1/auth/forgot-password', () => {
 
     const rawToken = new URL(capturedResetUrl).searchParams.get('token')!;
     assert.ok(rawToken);
-    assert.deepEqual(revokedWhere, { id: 'issued-token-id', usedAt: null });
-    assert.ok(revokedData.usedAt instanceof Date);
+    assert.deepEqual(deletedWhere, { id: 'issued-token-1' });
+    assert.equal(storedTokens.length, 0);
 
     assert.ok(errorLogs.length >= 1);
     const combinedLogs = errorLogs.join('\n');
@@ -371,5 +462,15 @@ describe('POST /api/v1/auth/forgot-password', () => {
     assert.equal(combinedLogs.includes('secret_smtp_user'), false);
     assert.equal(combinedLogs.includes('super_secret_pass'), false);
     assert.equal(text.includes(rawToken), false);
+
+    // Retry ngay lập tức (< 60s) sau khi SMTP phục hồi phải thành công 200 và gửi mail mới
+    shouldFailSend = false;
+    const retry = await sendRequest(testApp, '/api/v1/auth/forgot-password', {
+      email: 'smtp-fail@example.com',
+    });
+    assert.equal(retry.response.status, 200);
+    assert.deepEqual(retry.body, FORGOT_PASSWORD_NEUTRAL_RESPONSE);
+    assert.equal(storedTokens.length, 1);
+    assert.equal(sentEmails.length, 1);
   });
 });

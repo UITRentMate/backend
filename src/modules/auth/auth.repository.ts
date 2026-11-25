@@ -1,4 +1,4 @@
-import { recordAuditLog } from '../../common/utils/audit-log.util';
+import type { PrismaDbClient } from '../../common/utils/audit-log.util';
 import { prisma } from '../../infrastructure/database/prisma';
 
 export interface PasswordResetUserRecord {
@@ -13,16 +13,20 @@ export interface IssuedPasswordResetToken {
   expiresAt: Date;
 }
 
-export type ConsumeResetTokenResult =
-  | { status: 'invalid' }
-  | { status: 'ok'; userId: string };
+export interface ConsumedPasswordResetToken {
+  tokenId: string;
+  userId: string;
+}
 
 /**
  * Repository truy vấn dữ liệu cho luồng quên/đặt lại mật khẩu trong module Auth.
  */
 export const AuthRepository = {
-  async findUserForPasswordResetByEmail(email: string): Promise<PasswordResetUserRecord | null> {
-    return prisma.user.findUnique({
+  async findUserForPasswordResetByEmail(
+    email: string,
+    db: PrismaDbClient = prisma,
+  ): Promise<PasswordResetUserRecord | null> {
+    return db.user.findUnique({
       where: { email },
       select: {
         id: true,
@@ -33,109 +37,147 @@ export const AuthRepository = {
     });
   },
 
-  async findLatestPasswordResetTokenCreatedAt(userId: string): Promise<{ createdAt: Date } | null> {
-    return prisma.passwordResetToken.findFirst({
+  async lockUserForPasswordReset(tx: PrismaDbClient, userId: string): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM users WHERE id = ${userId}::uuid FOR UPDATE`;
+  },
+
+  async findLatestPasswordResetTokenCreatedAt(
+    userId: string,
+    db: PrismaDbClient = prisma,
+  ): Promise<{ createdAt: Date } | null> {
+    return db.passwordResetToken.findFirst({
       where: { userId },
       orderBy: { createdAt: 'desc' },
       select: { createdAt: true },
     });
   },
 
-  async issuePasswordResetToken(
+  async invalidateUnusedPasswordResetTokensInTx(
+    tx: PrismaDbClient,
     userId: string,
-    tokenHash: string,
-    expiresAt: Date,
-    now: Date,
+    usedAt: Date,
+  ): Promise<void> {
+    await tx.passwordResetToken.updateMany({
+      where: { userId, usedAt: null },
+      data: { usedAt },
+    });
+  },
+
+  async createPasswordResetTokenInTx(
+    tx: PrismaDbClient,
+    params: {
+      userId: string;
+      tokenHash: string;
+      expiresAt: Date;
+    },
   ): Promise<IssuedPasswordResetToken> {
-    return prisma.$transaction(async (tx) => {
-      await tx.passwordResetToken.updateMany({
-        where: { userId, usedAt: null },
-        data: { usedAt: now },
-      });
-
-      return tx.passwordResetToken.create({
-        data: {
-          userId,
-          tokenHash,
-          expiresAt,
-        },
-        select: {
-          id: true,
-          expiresAt: true,
-        },
-      });
+    return tx.passwordResetToken.create({
+      data: {
+        userId: params.userId,
+        tokenHash: params.tokenHash,
+        expiresAt: params.expiresAt,
+      },
+      select: {
+        id: true,
+        expiresAt: true,
+      },
     });
   },
 
-  async revokePasswordResetTokenById(tokenId: string, revokedAt: Date): Promise<void> {
-    await prisma.passwordResetToken.updateMany({
-      where: { id: tokenId, usedAt: null },
-      data: { usedAt: revokedAt },
+  async deletePasswordResetTokenById(
+    tokenId: string,
+    db: PrismaDbClient = prisma,
+  ): Promise<void> {
+    await db.passwordResetToken.deleteMany({
+      where: { id: tokenId },
     });
   },
 
-  async consumeResetTokenAndUpdatePassword(params: {
-    tokenHash: string;
-    newPasswordHash: string;
-    now: Date;
-  }): Promise<ConsumeResetTokenResult> {
-    const { tokenHash, newPasswordHash, now } = params;
-    return prisma.$transaction(async (tx) => {
-      const record = await tx.passwordResetToken.findUnique({
-        where: { tokenHash },
-        select: {
-          id: true,
-          userId: true,
-          expiresAt: true,
-          usedAt: true,
-          user: {
-            select: {
-              id: true,
-              accountStatus: true,
-            },
+  async hasUsableResetToken(
+    tokenHash: string,
+    now: Date,
+    db: PrismaDbClient = prisma,
+  ): Promise<boolean> {
+    const record = await db.passwordResetToken.findUnique({
+      where: { tokenHash },
+      select: {
+        expiresAt: true,
+        usedAt: true,
+        user: {
+          select: {
+            accountStatus: true,
           },
         },
-      });
+      },
+    });
 
-      if (
-        !record ||
-        record.usedAt !== null ||
-        record.expiresAt <= now ||
-        record.user.accountStatus !== 'ACTIVE'
-      ) {
-        return { status: 'invalid' as const };
-      }
+    return Boolean(
+      record &&
+        record.usedAt === null &&
+        record.expiresAt > now &&
+        record.user.accountStatus === 'ACTIVE',
+    );
+  },
 
-      const consumed = await tx.passwordResetToken.updateMany({
-        where: { id: record.id, usedAt: null, expiresAt: { gt: now } },
-        data: { usedAt: now },
-      });
+  async consumeUsableResetTokenInTx(
+    tx: PrismaDbClient,
+    tokenHash: string,
+    now: Date,
+  ): Promise<ConsumedPasswordResetToken | null> {
+    const record = await tx.passwordResetToken.findUnique({
+      where: { tokenHash },
+      select: {
+        id: true,
+        userId: true,
+        expiresAt: true,
+        usedAt: true,
+        user: {
+          select: {
+            id: true,
+            accountStatus: true,
+          },
+        },
+      },
+    });
 
-      if (consumed.count !== 1) {
-        return { status: 'invalid' as const };
-      }
+    if (
+      !record ||
+      record.usedAt !== null ||
+      record.expiresAt <= now ||
+      record.user.accountStatus !== 'ACTIVE'
+    ) {
+      return null;
+    }
 
-      await tx.user.update({
-        where: { id: record.userId },
-        data: { passwordHash: newPasswordHash },
-        select: { id: true },
-      });
+    const consumed = await tx.passwordResetToken.updateMany({
+      where: { id: record.id, usedAt: null, expiresAt: { gt: now } },
+      data: { usedAt: now },
+    });
 
-      await tx.refreshSession.updateMany({
-        where: { userId: record.userId, revokedAt: null },
-        data: { revokedAt: now },
-      });
+    if (consumed.count !== 1) {
+      return null;
+    }
 
-      await recordAuditLog(tx, {
-        actorId: record.userId,
-        entityType: 'User',
-        entityId: record.userId,
-        action: 'PASSWORD_RESET_COMPLETED',
-        oldData: null,
-        newData: { sessionsRevoked: true, resetTokenId: record.id },
-      });
+    return { tokenId: record.id, userId: record.userId };
+  },
 
-      return { status: 'ok' as const, userId: record.userId };
+  async updateUserPasswordAndRevokeSessionsInTx(
+    tx: PrismaDbClient,
+    params: {
+      userId: string;
+      newPasswordHash: string;
+      revokedAt: Date;
+    },
+  ): Promise<void> {
+    await tx.user.update({
+      where: { id: params.userId },
+      data: { passwordHash: params.newPasswordHash },
+      select: { id: true },
+    });
+
+    await tx.refreshSession.updateMany({
+      where: { userId: params.userId, revokedAt: null },
+      data: { revokedAt: params.revokedAt },
     });
   },
 };

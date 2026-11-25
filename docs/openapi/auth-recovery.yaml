@@ -25,12 +25,13 @@ paths:
     post:
       tags:
         - Auth Recovery
+      security: []
       summary: Yêu cầu gửi email đặt lại mật khẩu
       description: |
         Nhận địa chỉ email người dùng, kiểm tra tài khoản `ACTIVE` và thời gian chờ cooldown 60 giây.
         Nếu hợp lệ, vô hiệu hóa các token đặt lại mật khẩu chưa dùng trước đó, tạo token ngẫu nhiên 64 ký tự hex (lưu bản băm SHA-256 với thời hạn 15 phút) và gửi email chứa liên kết đặt lại mật khẩu.
         Luôn trả về HTTP `200` với thông điệp trung tính dù email không tồn tại, tài khoản bị khóa/ngừng hoạt động hay đang trong cooldown.
-        Nếu quá trình gửi email gặp sự cố, token vừa tạo sẽ được thu hồi và API trả về `500 INTERNAL_ERROR`.
+        Nếu quá trình gửi email gặp sự cố, token vừa tạo chưa gửi được sẽ bị xóa khỏi hệ thống để không khóa cooldown 60 giây và API trả về `500 INTERNAL_ERROR`.
       operationId: forgotPassword
       requestBody:
         required: true
@@ -54,9 +55,10 @@ paths:
     post:
       tags:
         - Auth Recovery
+      security: []
       summary: Đặt lại mật khẩu bằng token khôi phục
       description: |
-        Xác thực token khôi phục mật khẩu (băm SHA-256 đối chiếu với `password_reset_tokens`), tiêu thụ token nguyên tử trong giao dịch cơ sở dữ liệu để chống gửi trùng lặp đồng thời, cập nhật mật khẩu mới (bcrypt 12 rounds), thu hồi toàn bộ phiên `refresh_sessions` còn hiệu lực, ghi nhật ký `AuditLog` (`PASSWORD_RESET_COMPLETED`) không chứa thông tin nhạy cảm và xóa cookie `refreshToken`.
+        Xác thực token khôi phục mật khẩu (băm SHA-256 đối chiếu với `password_reset_tokens`), tiêu thụ token nguyên tử trong giao dịch cơ sở dữ liệu mức `Serializable` để chống tranh chấp đồng thời, cập nhật mật khẩu mới (bcrypt 12 rounds), thu hồi toàn bộ phiên `refresh_sessions` còn hiệu lực, ghi nhật ký `AuditLog` (`PASSWORD_RESET_COMPLETED`) không chứa thông tin nhạy cảm và xóa cookie `refreshToken`.
         Chấp nhận cả `confirmPassword` và `confirmNewPassword` (ít nhất một trường phải được cung cấp; nếu gửi cả hai thì hai giá trị phải trùng khớp và khớp với `newPassword`).
       operationId: resetPassword
       requestBody:

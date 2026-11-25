@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import { Prisma } from '@prisma/client';
 import { PHASE3_TIME_LIMITS_MS } from '../../common/constants/phase3-status';
 import { ApiError } from '../../common/errors/api-error';
+import { recordAuditLog } from '../../common/utils/audit-log.util';
 import { getFrontendResetPasswordUrl } from '../../config/env';
 import { prisma } from '../../infrastructure/database/prisma';
 import { defaultEmailSender, type EmailSender } from '../../infrastructure/mail/email.service';
@@ -167,16 +168,37 @@ export async function forgotPassword(
     return FORGOT_PASSWORD_NEUTRAL_RESPONSE;
   }
 
-  const latestToken = await AuthRepository.findLatestPasswordResetTokenCreatedAt(user.id);
-  const now = new Date();
-  if (latestToken && now.getTime() - latestToken.createdAt.getTime() < PASSWORD_RESET_COOLDOWN_MS) {
+  const frontendResetUrl = getFrontendResetPasswordUrl();
+  const { rawToken, tokenHash } = newPasswordResetToken();
+  const resetUrl = buildPasswordResetUrl(frontendResetUrl, rawToken);
+
+  const txResult = await prisma.$transaction(async (tx) => {
+    await AuthRepository.lockUserForPasswordReset(tx, user.id);
+
+    const latestToken = await AuthRepository.findLatestPasswordResetTokenCreatedAt(user.id, tx);
+    const now = new Date();
+    if (latestToken && now.getTime() - latestToken.createdAt.getTime() < PASSWORD_RESET_COOLDOWN_MS) {
+      return { issued: false as const };
+    }
+
+    const expiresAt = new Date(now.getTime() + PHASE3_TIME_LIMITS_MS.PASSWORD_RESET_TTL_MS);
+    await AuthRepository.invalidateUnusedPasswordResetTokensInTx(tx, user.id, now);
+    const issued = await AuthRepository.createPasswordResetTokenInTx(tx, {
+      userId: user.id,
+      tokenHash,
+      expiresAt,
+    });
+
+    return {
+      issued: true as const,
+      tokenId: issued.id,
+      expiresAt: issued.expiresAt,
+    };
+  });
+
+  if (!txResult.issued) {
     return FORGOT_PASSWORD_NEUTRAL_RESPONSE;
   }
-
-  const { rawToken, tokenHash } = newPasswordResetToken();
-  const resetUrl = buildPasswordResetUrl(getFrontendResetPasswordUrl(), rawToken);
-  const expiresAt = new Date(now.getTime() + PHASE3_TIME_LIMITS_MS.PASSWORD_RESET_TTL_MS);
-  const issued = await AuthRepository.issuePasswordResetToken(user.id, tokenHash, expiresAt, now);
 
   try {
     await emailSender.sendPasswordResetEmail({
@@ -186,15 +208,15 @@ export async function forgotPassword(
       expiresInMinutes: Math.round(PHASE3_TIME_LIMITS_MS.PASSWORD_RESET_TTL_MS / 60000),
     });
   } catch (error) {
-    await AuthRepository.revokePasswordResetTokenById(issued.id, new Date()).catch((revokeError) => {
-      console.error('[auth.forgotPassword] Failed to revoke password reset token after email error', {
-        tokenId: issued.id,
-        errorName: revokeError instanceof Error ? revokeError.name : 'UnknownError',
+    await AuthRepository.deletePasswordResetTokenById(txResult.tokenId).catch((deleteError) => {
+      console.error('[auth.forgotPassword] Failed to delete password reset token after email error', {
+        tokenId: txResult.tokenId,
+        errorName: deleteError instanceof Error ? deleteError.name : 'UnknownError',
       });
     });
     console.error('[auth.forgotPassword] Failed to send password reset email', {
       userId: user.id,
-      tokenId: issued.id,
+      tokenId: txResult.tokenId,
       errorName: error instanceof Error ? error.name : 'UnknownError',
     });
     throw new ApiError(500, 'INTERNAL_ERROR', 'Hệ thống đang gặp sự cố tạm thời. Vui lòng thử lại sau.');
@@ -208,11 +230,39 @@ export async function forgotPassword(
  */
 export async function resetPassword(input: ReturnType<typeof parseResetPassword>) {
   const tokenHash = sha256Hex(input.token);
+  const usable = await AuthRepository.hasUsableResetToken(tokenHash, new Date());
+  if (!usable) {
+    throw new ApiError(
+      400,
+      'INVALID_OR_EXPIRED_RESET_TOKEN',
+      'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn',
+    );
+  }
+
   const newPasswordHash = await bcrypt.hash(input.newPassword, BCRYPT_ROUNDS);
-  const result = await AuthRepository.consumeResetTokenAndUpdatePassword({
-    tokenHash,
-    newPasswordHash,
-    now: new Date(),
+  const result = await withSerializableRetry(async (tx) => {
+    const now = new Date();
+    const consumed = await AuthRepository.consumeUsableResetTokenInTx(tx, tokenHash, now);
+    if (!consumed) {
+      return { status: 'invalid' as const };
+    }
+
+    await AuthRepository.updateUserPasswordAndRevokeSessionsInTx(tx, {
+      userId: consumed.userId,
+      newPasswordHash,
+      revokedAt: now,
+    });
+
+    await recordAuditLog(tx, {
+      actorId: consumed.userId,
+      entityType: 'User',
+      entityId: consumed.userId,
+      action: 'PASSWORD_RESET_COMPLETED',
+      oldData: null,
+      newData: { sessionsRevoked: true, resetTokenId: consumed.tokenId },
+    });
+
+    return { status: 'ok' as const, userId: consumed.userId };
   });
 
   if (result.status !== 'ok') {

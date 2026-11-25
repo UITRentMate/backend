@@ -129,7 +129,7 @@ test('Live DB: forgot-password stores SHA-256 tokenHash, respects cooldown, inva
     assert.equal(tokensAfterSecond[1].tokenHash, sha256Hex(rawToken2));
     assert.equal(tokensAfterSecond[1].usedAt, null);
 
-    // 4. Mô phỏng lỗi SMTP sau > 60s -> rollback (thu hồi token vừa phát hành) và trả 500
+    // 4. Mô phỏng lỗi SMTP sau > 60s -> xóa token chưa gửi được và trả 500, không khóa cooldown
     await prisma.passwordResetToken.update({
       where: { id: tokensAfterSecond[1].id },
       data: { createdAt: new Date(Date.now() - 61 * 1000) },
@@ -144,8 +144,88 @@ test('Live DB: forgot-password stores SHA-256 tokenHash, respects cooldown, inva
       where: { userId },
       orderBy: { createdAt: 'asc' },
     });
-    assert.equal(tokensAfterFailure.length, 3);
-    assert.ok(tokensAfterFailure[2].usedAt !== null, 'Token mới tạo phải bị thu hồi khi SMTP lỗi');
+    assert.equal(tokensAfterFailure.length, 2, 'Token chưa gửi được phải bị xóa khỏi DB khi SMTP lỗi');
+    assert.equal(tokensAfterFailure[1].id, tokensAfterSecond[1].id);
+    assert.ok(tokensAfterFailure[1].usedAt !== null);
+
+    // 5. Gọi lại ngay lập tức (< 60s) sau khi SMTP phục hồi -> vẫn thành công 200 và gửi mail hợp lệ
+    shouldFailSend = false;
+    const retryRes = await sendForgotPasswordRequest(testApp, email);
+    assert.equal(retryRes.response.status, 200);
+    assert.deepEqual(retryRes.body, FORGOT_PASSWORD_NEUTRAL_RESPONSE);
+    assert.equal(sentEmails.length, 3);
+
+    const rawToken3 = new URL(sentEmails[2].resetUrl).searchParams.get('token')!;
+    assert.match(rawToken3, /^[0-9a-f]{64}$/);
+    assert.notEqual(rawToken3, rawToken2);
+
+    const tokensAfterRetry = await prisma.passwordResetToken.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'asc' },
+    });
+    assert.equal(tokensAfterRetry.length, 3);
+    assert.equal(tokensAfterRetry[2].tokenHash, sha256Hex(rawToken3));
+    assert.equal(tokensAfterRetry[2].usedAt, null);
+  } finally {
+    if (userId) {
+      await prisma.passwordResetToken.deleteMany({ where: { userId } });
+      await prisma.user.deleteMany({ where: { id: userId } });
+    }
+  }
+});
+
+test('Live DB: 2 request forgot-password đồng thời chỉ phát hành đúng 1 token và gửi đúng 1 email', async (t) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+  } catch {
+    t.skip('PostgreSQL is not available');
+    return;
+  }
+
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const email = `forgot-race-db-${suffix}@rentmate.test`;
+  const phone = `09${String(Math.floor(Math.random() * 100000000)).padStart(8, '0')}`;
+  let userId: string | undefined;
+
+  const sentEmails: SendPasswordResetEmailParams[] = [];
+  const mockSender: EmailSender = {
+    async sendPasswordResetEmail(params) {
+      sentEmails.push(params);
+    },
+  };
+
+  const testApp = express();
+  testApp.use(express.json());
+  testApp.use('/api/v1/auth', createAuthRoutes({ emailSender: mockSender }));
+  testApp.use(errorHandler);
+
+  try {
+    const user = await prisma.user.create({
+      data: {
+        fullName: 'Forgot Password Race DB Test',
+        email,
+        phone,
+        passwordHash: 'test-only',
+        role: 'TENANT',
+        accountStatus: 'ACTIVE',
+      },
+    });
+    userId = user.id;
+
+    const [resA, resB] = await Promise.all([
+      sendForgotPasswordRequest(testApp, email),
+      sendForgotPasswordRequest(testApp, email),
+    ]);
+
+    assert.equal(resA.response.status, 200);
+    assert.equal(resB.response.status, 200);
+    assert.deepEqual(resA.body, FORGOT_PASSWORD_NEUTRAL_RESPONSE);
+    assert.deepEqual(resB.body, FORGOT_PASSWORD_NEUTRAL_RESPONSE);
+    assert.equal(sentEmails.length, 1);
+
+    const tokens = await prisma.passwordResetToken.findMany({ where: { userId } });
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].usedAt, null);
   } finally {
     if (userId) {
       await prisma.passwordResetToken.deleteMany({ where: { userId } });

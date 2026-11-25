@@ -371,4 +371,121 @@ describe('Live DB: POST /api/v1/auth/reset-password', () => {
       }
     }
   });
+
+  test('reset-password và refresh chạy đồng thời không để lại RefreshSession còn hiệu lực', async (t) => {
+    if (!(await isDatabaseAvailable())) {
+      t.skip('PostgreSQL is not available');
+      return;
+    }
+
+    const previousJwtSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET ??= 'test-secret-must-have-at-least-thirty-two-bytes';
+
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const email = `reset-refresh-race-${suffix}@rentmate.test`;
+    const phone = `09${String(Math.floor(Math.random() * 100000000)).padStart(8, '0')}`;
+    const oldPassword = 'OldPassword@123';
+    const newPassword = 'NewPassword@456';
+    let userId: string | undefined;
+
+    const sentEmails: SendPasswordResetEmailParams[] = [];
+    const mockSender: EmailSender = {
+      async sendPasswordResetEmail(params) {
+        sentEmails.push(params);
+      },
+    };
+
+    const testApp = express();
+    testApp.use(express.json());
+    testApp.use('/api/v1/auth', createAuthRoutes({ emailSender: mockSender }));
+    testApp.use(errorHandler);
+
+    const server = http.createServer(testApp);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const user = await prisma.user.create({
+        data: {
+          fullName: 'Reset vs Refresh Race Test',
+          email,
+          phone,
+          passwordHash: await bcrypt.hash(oldPassword, 10),
+          role: 'TENANT',
+          accountStatus: 'ACTIVE',
+        },
+      });
+      userId = user.id;
+
+      const loginRes = await fetch(`http://127.0.0.1:${port}/api/v1/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: email, password: oldPassword }),
+      });
+      assert.equal(loginRes.status, 200);
+      const initialRefreshToken = extractRefreshCookieValue(loginRes.headers.get('set-cookie'));
+      assert.ok(initialRefreshToken);
+
+      const forgotRes = await fetch(`http://127.0.0.1:${port}/api/v1/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      assert.equal(forgotRes.status, 200);
+      const rawToken = new URL(sentEmails[0].resetUrl).searchParams.get('token')!;
+
+      const [resetResult, refreshResult] = await Promise.all([
+        fetch(`http://127.0.0.1:${port}/api/v1/auth/reset-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: rawToken,
+            newPassword,
+            confirmNewPassword: newPassword,
+          }),
+        }),
+        fetch(`http://127.0.0.1:${port}/api/v1/auth/refresh`, {
+          method: 'POST',
+          headers: { Cookie: `refreshToken=${initialRefreshToken}` },
+        }),
+      ]);
+
+      assert.equal(resetResult.status, 200);
+
+      const rotatedRefreshToken = extractRefreshCookieValue(refreshResult.headers.get('set-cookie'));
+      const activeSessions = await prisma.refreshSession.count({
+        where: { userId, revokedAt: null },
+      });
+      assert.equal(activeSessions, 0, 'Không được còn bất kỳ RefreshSession hoạt động nào sau reset-password');
+
+      const retryOldRes = await fetch(`http://127.0.0.1:${port}/api/v1/auth/refresh`, {
+        method: 'POST',
+        headers: { Cookie: `refreshToken=${initialRefreshToken}` },
+      });
+      assert.equal(retryOldRes.status, 401);
+
+      if (rotatedRefreshToken) {
+        const retryRotatedRes = await fetch(`http://127.0.0.1:${port}/api/v1/auth/refresh`, {
+          method: 'POST',
+          headers: { Cookie: `refreshToken=${rotatedRefreshToken}` },
+        });
+        assert.equal(retryRotatedRes.status, 401);
+      }
+    } finally {
+      if (previousJwtSecret === undefined) {
+        delete process.env.JWT_SECRET;
+      } else {
+        process.env.JWT_SECRET = previousJwtSecret;
+      }
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      if (userId) {
+        await prisma.auditLog.deleteMany({ where: { actorId: userId } });
+        await prisma.refreshSession.deleteMany({ where: { userId } });
+        await prisma.passwordResetToken.deleteMany({ where: { userId } });
+        await prisma.user.deleteMany({ where: { id: userId } });
+      }
+    }
+  });
 });
