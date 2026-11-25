@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { ApiError } from '../../common/errors/api-error';
 
-const passwordSchema = z.string()
+export const passwordSchema = z.string()
   .min(8, 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
   .refine((value) => Buffer.byteLength(value, 'utf8') <= 72, 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
   .refine((value) => /[a-z]/.test(value), 'Mật khẩu cần 8 đến 72 byte UTF-8, chữ hoa, chữ thường, số và ký tự đặc biệt')
