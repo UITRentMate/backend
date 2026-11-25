@@ -4,6 +4,7 @@ import { errorHandler } from './common/middleware/error-handler';
 
 import { authRoutes } from './modules/auth/auth.routes';
 import { contractRouter } from './modules/contracts/contract.routes';
+import { depositRouter } from './modules/deposits/deposit.routes';
 import { notificationRouter } from './modules/notifications/notification.routes';
 import { propertyRouter } from './modules/properties/property.routes';
 import { rentalRequestRouter } from './modules/rental-requests/rental-request.routes';
@@ -66,6 +67,7 @@ app.use(viewingAppointmentRouter);
 // Phân hệ Yêu cầu thuê phòng (BE-P2-06 / Issue #19)
 app.use(rentalRequestRouter);
 app.use(contractRouter);
+app.use(depositRouter);
 app.use(residentRouter);
 
 // Phân hệ Thông báo In-App (BE-P3-07 / Issue #36)
