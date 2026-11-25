@@ -77,8 +77,8 @@ const rejectRentalRequestSchema = z
 
 const rentalRequestFilterQuerySchema = z.object({
   status: z
-    .enum(['PENDING', 'REJECTED'], {
-      error: 'Trạng thái lọc chỉ được là PENDING hoặc REJECTED',
+    .enum(['PENDING', 'APPROVED', 'REJECTED'], {
+      error: 'Trạng thái lọc chỉ được là PENDING, APPROVED hoặc REJECTED',
     })
     .optional(),
   roomId: z
