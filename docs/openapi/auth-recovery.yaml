@@ -1,0 +1,233 @@
+openapi: 3.1.0
+info:
+  title: RentMate — Auth Recovery API Specification
+  version: 1.0.0
+  description: |
+    Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho luồng **Khôi phục mật khẩu (BE-P3-02 / Issue #31)** thuộc phân hệ Authentication của nền tảng RentMate.
+    Bao gồm 2 endpoint công khai:
+    - `POST /api/v1/auth/forgot-password`: Phát hành token đặt lại mật khẩu (TTL 15 phút, cooldown 60 giây) và gửi email đặt lại mật khẩu với phản hồi trung tính để tránh lộ sự tồn tại của tài khoản.
+    - `POST /api/v1/auth/reset-password`: Xác thực token đặt lại mật khẩu một lần (single-use, SHA-256), cập nhật mật khẩu mới (bcrypt 12 rounds), thu hồi toàn bộ phiên đăng nhập (`RefreshSession`), ghi nhận `AuditLog` bất biến và xóa cookie `refreshToken`.
+  contact:
+    name: RentMate Engineering Team (SE100 - Nhóm 15)
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+servers:
+  - url: http://localhost:5000
+    description: Máy chủ phát triển cục bộ (Local Development)
+
+tags:
+  - name: Auth Recovery
+    description: Các API công khai hỗ trợ quên mật khẩu và đặt lại mật khẩu.
+
+paths:
+  /api/v1/auth/forgot-password:
+    post:
+      tags:
+        - Auth Recovery
+      summary: Yêu cầu gửi email đặt lại mật khẩu
+      description: |
+        Nhận địa chỉ email người dùng, kiểm tra tài khoản `ACTIVE` và thời gian chờ cooldown 60 giây.
+        Nếu hợp lệ, vô hiệu hóa các token đặt lại mật khẩu chưa dùng trước đó, tạo token ngẫu nhiên 64 ký tự hex (lưu bản băm SHA-256 với thời hạn 15 phút) và gửi email chứa liên kết đặt lại mật khẩu.
+        Luôn trả về HTTP `200` với thông điệp trung tính dù email không tồn tại, tài khoản bị khóa/ngừng hoạt động hay đang trong cooldown.
+        Nếu quá trình gửi email gặp sự cố, token vừa tạo sẽ được thu hồi và API trả về `500 INTERNAL_ERROR`.
+      operationId: forgotPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ForgotPasswordRequest'
+      responses:
+        '200':
+          description: Yêu cầu đã được tiếp nhận (phản hồi trung tính)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForgotPasswordResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/auth/reset-password:
+    post:
+      tags:
+        - Auth Recovery
+      summary: Đặt lại mật khẩu bằng token khôi phục
+      description: |
+        Xác thực token khôi phục mật khẩu (băm SHA-256 đối chiếu với `password_reset_tokens`), tiêu thụ token nguyên tử trong giao dịch cơ sở dữ liệu để chống gửi trùng lặp đồng thời, cập nhật mật khẩu mới (bcrypt 12 rounds), thu hồi toàn bộ phiên `refresh_sessions` còn hiệu lực, ghi nhật ký `AuditLog` (`PASSWORD_RESET_COMPLETED`) không chứa thông tin nhạy cảm và xóa cookie `refreshToken`.
+        Chấp nhận cả `confirmPassword` và `confirmNewPassword` (ít nhất một trường phải được cung cấp; nếu gửi cả hai thì hai giá trị phải trùng khớp và khớp với `newPassword`).
+      operationId: resetPassword
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetPasswordRequest'
+      responses:
+        '200':
+          description: Đặt lại mật khẩu thành công và đã xóa cookie phiên đăng nhập cũ
+          headers:
+            Set-Cookie:
+              schema:
+                type: string
+                example: "refreshToken=; Path=/api/v1/auth; HttpOnly; SameSite=Lax; Max-Age=0"
+              description: Xóa HttpOnly cookie `refreshToken` trên trình duyệt (`Max-Age=0`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResetPasswordResponse'
+        '400':
+          description: Dữ liệu đầu vào không hợp lệ hoặc token đặt lại mật khẩu không hợp lệ / đã hết hạn
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+              examples:
+                validationError:
+                  summary: Lỗi kiểm tra dữ liệu đầu vào
+                  value:
+                    success: false
+                    code: "VALIDATION_ERROR"
+                    message: "Dữ liệu không hợp lệ"
+                    traceId: "550e8400-e29b-41d4-a716-446655440000"
+                    errors:
+                      confirmNewPassword:
+                        - "Mật khẩu xác nhận không khớp"
+                invalidOrExpiredToken:
+                  summary: Token không hợp lệ, đã sử dụng, hết hạn hoặc tài khoản không ACTIVE
+                  value:
+                    success: false
+                    code: "INVALID_OR_EXPIRED_RESET_TOKEN"
+                    message: "Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn"
+                    traceId: "550e8400-e29b-41d4-a716-446655440001"
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  schemas:
+    ForgotPasswordRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - email
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 255
+          example: "nguyenvana@example.com"
+          description: Địa chỉ email đã đăng ký tài khoản (tự động trim và lowercase)
+
+    ForgotPasswordResponse:
+      type: object
+      required:
+        - success
+        - message
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+          example: true
+        message:
+          type: string
+          example: "Nếu email tồn tại trong hệ thống, hướng dẫn đặt lại mật khẩu đã được gửi."
+
+    ResetPasswordRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - token
+        - newPassword
+      properties:
+        token:
+          type: string
+          minLength: 1
+          maxLength: 256
+          example: "a1b2c3d4e5f60718293a4b5c6d7e8f90123456789abcdef0123456789abcdef0"
+          description: Token đặt lại mật khẩu nhận từ email khôi phục
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 72
+          example: "NewPassword@123"
+          description: Mật khẩu mới (8–72 byte UTF-8, có chữ hoa, chữ thường, chữ số và ký tự đặc biệt)
+        confirmPassword:
+          type: string
+          example: "NewPassword@123"
+          description: Xác nhận mật khẩu mới (tùy chọn nếu đã gửi `confirmNewPassword`; nếu gửi cả hai phải trùng nhau và khớp `newPassword`)
+        confirmNewPassword:
+          type: string
+          example: "NewPassword@123"
+          description: Xác nhận mật khẩu mới (tùy chọn nếu đã gửi `confirmPassword`; nếu gửi cả hai phải trùng nhau và khớp `newPassword`)
+
+    ResetPasswordResponse:
+      type: object
+      required:
+        - success
+        - message
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+          example: true
+        message:
+          type: string
+          example: "Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại."
+
+    ApiErrorResponse:
+      type: object
+      required:
+        - success
+        - code
+        - message
+        - traceId
+      properties:
+        success:
+          type: boolean
+          example: false
+        code:
+          type: string
+          example: "VALIDATION_ERROR"
+        message:
+          type: string
+          example: "Dữ liệu không hợp lệ"
+        traceId:
+          type: string
+          format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+
+  responses:
+    ValidationError:
+      description: Dữ liệu gửi lên không đúng định dạng hoặc thiếu trường bắt buộc
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "VALIDATION_ERROR"
+            message: "Dữ liệu không hợp lệ"
+            traceId: "550e8400-e29b-41d4-a716-446655440000"
+            errors:
+              email:
+                - "Email không hợp lệ"
+
+    InternalError:
+      description: Lỗi hệ thống nội bộ
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiErrorResponse'
+          example:
+            success: false
+            code: "INTERNAL_ERROR"
+            message: "Hệ thống đang gặp sự cố tạm thời. Vui lòng thử lại sau."
+            traceId: "550e8400-e29b-41d4-a716-446655440000"

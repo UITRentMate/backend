@@ -6,6 +6,7 @@ import {
   logoutController,
   refreshController,
   registerController,
+  resetPasswordController,
 } from './auth.controller';
 
 export interface AuthRoutesDependencies {
@@ -24,6 +25,7 @@ export function createAuthRoutes(deps: AuthRoutesDependencies = {}): Router {
   router.post('/refresh', refreshController);
   router.post('/logout', logoutController);
   router.post('/forgot-password', forgotPasswordHandler);
+  router.post('/reset-password', resetPasswordController);
 
   return router;
 }

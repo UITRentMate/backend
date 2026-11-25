@@ -14,9 +14,10 @@ import {
   newPasswordResetToken,
   newRefreshToken,
   REFRESH_TTL_SECONDS,
+  sha256Hex,
   signAccessToken,
 } from './auth.security';
-import type { parseForgotPassword, parseLogin, parseRegister } from './auth.validation';
+import type { parseForgotPassword, parseLogin, parseRegister, parseResetPassword } from './auth.validation';
 
 export const FORGOT_PASSWORD_NEUTRAL_RESPONSE = {
   success: true,
@@ -200,4 +201,30 @@ export async function forgotPassword(
   }
 
   return FORGOT_PASSWORD_NEUTRAL_RESPONSE;
+}
+
+/**
+ * Đặt lại mật khẩu từ token khôi phục một lần, thu hồi toàn bộ phiên đăng nhập và ghi nhận AuditLog.
+ */
+export async function resetPassword(input: ReturnType<typeof parseResetPassword>) {
+  const tokenHash = sha256Hex(input.token);
+  const newPasswordHash = await bcrypt.hash(input.newPassword, BCRYPT_ROUNDS);
+  const result = await AuthRepository.consumeResetTokenAndUpdatePassword({
+    tokenHash,
+    newPasswordHash,
+    now: new Date(),
+  });
+
+  if (result.status !== 'ok') {
+    throw new ApiError(
+      400,
+      'INVALID_OR_EXPIRED_RESET_TOKEN',
+      'Liên kết đặt lại mật khẩu không hợp lệ hoặc đã hết hạn',
+    );
+  }
+
+  return {
+    success: true,
+    message: 'Đặt lại mật khẩu thành công. Vui lòng đăng nhập lại.',
+  };
 }

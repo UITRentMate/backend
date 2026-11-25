@@ -1,9 +1,9 @@
 import type { Request, Response } from 'express';
 import { ApiError } from '../../common/errors/api-error';
 import { defaultEmailSender, type EmailSender } from '../../infrastructure/mail/email.service';
-import { forgotPassword, login, logout, refreshSession, register } from './auth.service';
+import { forgotPassword, login, logout, refreshSession, register, resetPassword } from './auth.service';
 import { readRefreshCookie, REFRESH_COOKIE, refreshCookieOptions } from './auth.security';
-import { parseForgotPassword, parseLogin, parseRegister } from './auth.validation';
+import { parseForgotPassword, parseLogin, parseRegister, parseResetPassword } from './auth.validation';
 
 export async function registerController(req: Request, res: Response) {
   const user = await register(parseRegister(req.body));
@@ -52,3 +52,12 @@ export function createForgotPasswordController(emailSender: EmailSender = defaul
 }
 
 export const forgotPasswordController = createForgotPasswordController();
+
+/**
+ * Xử lý POST /api/v1/auth/reset-password, đặt lại mật khẩu và xóa cookie refreshToken.
+ */
+export async function resetPasswordController(req: Request, res: Response) {
+  const result = await resetPassword(parseResetPassword(req.body));
+  res.cookie(REFRESH_COOKIE, '', refreshCookieOptions(0));
+  res.status(200).json(result);
+}
