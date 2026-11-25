@@ -1,7 +1,9 @@
 import bcrypt from 'bcrypt';
 import { ApiError } from '../../common/errors/api-error';
+import { recordAuditLog } from '../../common/utils/audit-log.util';
 import { buildUserAvatarPublicId } from '../../common/utils/cloudinary.util';
-import { BCRYPT_ROUNDS } from '../auth/auth.service';
+import { prisma } from '../../infrastructure/database/prisma';
+import { BCRYPT_ROUNDS, withSerializableRetry } from '../auth/auth.service';
 import { mediaService } from '../media/media.service';
 import { UsersRepository } from './users.repository';
 import type {
@@ -85,11 +87,12 @@ export async function updateCurrentUser(
   userId: string,
   input: UpdateUserProfileInput,
 ): Promise<UserProfileDTO> {
-  const existing = await UsersRepository.findProfileById(userId);
-  assertActiveUser(existing);
-
   try {
-    const updated = await UsersRepository.updateProfileById(userId, input);
+    const updated = await prisma.$transaction(async (tx) => {
+      const locked = await UsersRepository.lockProfileStatusForUpdate(tx, userId);
+      assertActiveUser(locked);
+      return UsersRepository.updateProfileInTx(tx, userId, input);
+    });
     return toUserProfileDTO(updated);
   } catch (error) {
     if (isPhoneUniqueConstraintError(error)) {
@@ -108,7 +111,7 @@ export async function updateCurrentUser(
 
 /**
  * Tải lên và cập nhật ảnh đại diện cho người dùng hiện tại (512x512 face-crop).
- * Rollback xóa ảnh mới trên Cloudinary nếu cập nhật DB thất bại; dọn ảnh cũ best-effort sau khi DB thành công.
+ * Rollback xóa ảnh mới trên Cloudinary nếu transaction thất bại; dọn ảnh cũ best-effort sau khi commit.
  */
 export async function uploadMyAvatar(
   userId: string,
@@ -129,15 +132,33 @@ export async function uploadMyAvatar(
   });
 
   let updated: UserProfileRecord;
+  let previousPublicId: string | null = null;
   try {
-    updated = await UsersRepository.updateAvatarById(userId, {
-      avatarUrl: uploadResult.secureUrl,
-      avatarCloudinaryPublicId: uploadResult.publicId,
+    const txResult = await prisma.$transaction(async (tx) => {
+      const locked = await UsersRepository.lockAvatarContextForUpdate(tx, userId);
+      assertActiveUser(locked);
+
+      const nextProfile = await UsersRepository.updateAvatarInTx(tx, userId, {
+        avatarUrl: uploadResult.secureUrl,
+        avatarCloudinaryPublicId: uploadResult.publicId,
+      });
+
+      return {
+        updated: nextProfile,
+        previousPublicId: locked.avatarCloudinaryPublicId,
+      };
     });
+    updated = txResult.updated;
+    previousPublicId = txResult.previousPublicId;
   } catch (error) {
-    // Bù trừ lỗi: Xóa ảnh vừa upload trên Cloudinary nếu cập nhật DB thất bại
+    // Bù trừ lỗi: Xóa ảnh vừa upload trên Cloudinary nếu cập nhật DB thất bại hoặc TOCTOU từ chối
     try {
-      await mediaService.deleteResource(uploadResult.publicId);
+      const rolledBack = await mediaService.deleteResource(uploadResult.publicId);
+      if (!rolledBack) {
+        console.warn(
+          `[UsersService] Failed to rollback newly uploaded avatar ${uploadResult.publicId}`,
+        );
+      }
     } catch (rollbackError) {
       console.warn(
         `[UsersService] Failed to rollback newly uploaded avatar ${uploadResult.publicId}:`,
@@ -156,15 +177,14 @@ export async function uploadMyAvatar(
   }
 
   // Dọn dẹp ảnh đại diện cũ best-effort, không làm hỏng request nếu xóa thất bại
-  const oldPublicId = existing.avatarCloudinaryPublicId;
-  if (oldPublicId && oldPublicId !== uploadResult.publicId) {
+  if (previousPublicId && previousPublicId !== uploadResult.publicId) {
     try {
-      const deleted = await mediaService.deleteResource(oldPublicId);
+      const deleted = await mediaService.deleteResource(previousPublicId);
       if (!deleted) {
-        console.warn(`[UsersService] Failed to cleanup old avatar ${oldPublicId}`);
+        console.warn(`[UsersService] Failed to cleanup old avatar ${previousPublicId}`);
       }
     } catch (cleanupError) {
-      console.warn(`[UsersService] Failed to cleanup old avatar ${oldPublicId}:`, cleanupError);
+      console.warn(`[UsersService] Failed to cleanup old avatar ${previousPublicId}:`, cleanupError);
     }
   }
 
@@ -186,8 +206,7 @@ export async function changeMyPassword(
     throw new ApiError(400, 'INVALID_CURRENT_PASSWORD', 'Mật khẩu hiện tại không đúng');
   }
 
-  const isSameAsCurrent = await bcrypt.compare(input.newPassword, user.passwordHash);
-  if (isSameAsCurrent) {
+  if (input.newPassword === input.currentPassword) {
     throw new ApiError(400, 'VALIDATION_ERROR', 'Dữ liệu đầu vào không hợp lệ', {
       newPassword: ['Mật khẩu mới không được trùng với mật khẩu hiện tại'],
     });
@@ -196,7 +215,26 @@ export async function changeMyPassword(
   const newHash = await bcrypt.hash(input.newPassword, BCRYPT_ROUNDS);
 
   try {
-    await UsersRepository.changePasswordAndRevokeSessions(userId, newHash);
+    await withSerializableRetry(async (tx) => {
+      const locked = await UsersRepository.lockPasswordContextForUpdate(tx, userId);
+      assertActiveUser(locked);
+
+      if (locked.passwordHash !== user.passwordHash) {
+        throw new ApiError(400, 'INVALID_CURRENT_PASSWORD', 'Mật khẩu hiện tại không đúng');
+      }
+
+      const revokedAt = new Date();
+      await UsersRepository.updatePasswordHashInTx(tx, userId, newHash);
+      await UsersRepository.revokeActiveRefreshSessionsInTx(tx, userId, revokedAt);
+      await recordAuditLog(tx, {
+        actorId: userId,
+        entityType: 'User',
+        entityId: userId,
+        action: 'PASSWORD_CHANGED',
+        oldData: null,
+        newData: { sessionsRevoked: true },
+      });
+    });
   } catch (error) {
     if (isRecordNotFoundError(error)) {
       throw new ApiError(

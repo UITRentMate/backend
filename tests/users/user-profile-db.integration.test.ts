@@ -6,29 +6,42 @@ import bcrypt from 'bcrypt';
 import { app } from '../../src/app';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { signAccessToken } from '../../src/modules/auth/auth.security';
+import { mediaService } from '../../src/modules/media/media.service';
 
 process.env.JWT_SECRET = 'test-secret-must-have-at-least-thirty-two-bytes';
 
-test('Live DB: GET & PUT /api/v1/users/me profile read, partial update, null clearing, and duplicate phone 409', async (t) => {
+const VALID_JPEG_BUFFER = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+const VALID_PNG_BUFFER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+async function checkProfileSchemaReady(
+  t: { skip: (message?: string) => void },
+  requiredColumns: string[],
+): Promise<boolean> {
   try {
     await prisma.$queryRaw`SELECT 1`;
   } catch {
     t.skip('PostgreSQL is not available');
-    return;
+    return false;
   }
 
-  const requiredColumns = ['avatar_url', 'date_of_birth', 'address'];
   const columnRows = await prisma.$queryRaw<Array<{ column_name: string }>>`
     SELECT column_name
     FROM information_schema.columns
     WHERE table_schema = current_schema()
       AND table_name = 'users'
-      AND column_name IN ('avatar_url', 'date_of_birth', 'address')
   `;
   const existingColumns = new Set(columnRows.map(({ column_name }) => column_name));
   const missingColumns = requiredColumns.filter((col) => !existingColumns.has(col));
   if (missingColumns.length > 0) {
     t.skip('Phase 3 user profile migration is not applied; missing columns: ' + missingColumns.join(', '));
+    return false;
+  }
+
+  return true;
+}
+
+test('Live DB: GET & PUT /api/v1/users/me profile read, partial update, null clearing, and duplicate phone 409', async (t) => {
+  if (!(await checkProfileSchemaReady(t, ['avatar_url', 'date_of_birth', 'address']))) {
     return;
   }
 
@@ -139,33 +152,15 @@ test('Live DB: GET & PUT /api/v1/users/me profile read, partial update, null cle
     const dupBody = await dupRes.json();
     assert.equal(dupBody.code, 'PHONE_ALREADY_EXISTS');
   } finally {
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     if (userIds.length > 0) {
       await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
     }
   }
 });
 
-test('Live DB: PATCH /api/v1/users/me/password revokes active refresh sessions so old refresh token gets 401', async (t) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-  } catch {
-    t.skip('PostgreSQL is not available');
-    return;
-  }
-
-  const requiredColumns = ['avatar_url', 'date_of_birth', 'address'];
-  const columnRows = await prisma.$queryRaw<Array<{ column_name: string }>>`
-    SELECT column_name
-    FROM information_schema.columns
-    WHERE table_schema = current_schema()
-      AND table_name = 'users'
-      AND column_name IN ('avatar_url', 'date_of_birth', 'address')
-  `;
-  const existingColumns = new Set(columnRows.map(({ column_name }) => column_name));
-  const missingColumns = requiredColumns.filter((col) => !existingColumns.has(col));
-  if (missingColumns.length > 0) {
-    t.skip('Phase 3 user profile migration is not applied; missing columns: ' + missingColumns.join(', '));
+test('Live DB: PATCH /api/v1/users/me/password revokes active refresh sessions, invalidates old password login, and allows new password login', async (t) => {
+  if (!(await checkProfileSchemaReady(t, ['avatar_url', 'date_of_birth', 'address']))) {
     return;
   }
 
@@ -236,6 +231,24 @@ test('Live DB: PATCH /api/v1/users/me/password revokes active refresh sessions s
     const refreshBody = await refreshRes.json();
     assert.equal(refreshBody.code, 'UNAUTHORIZED');
 
+    // Old password login fails with 401
+    const oldLoginRes = await fetch(`${baseUrl}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: email, password: oldPassword }),
+    });
+    assert.equal(oldLoginRes.status, 401);
+
+    // New password login succeeds with 200
+    const newLoginRes = await fetch(`${baseUrl}/api/v1/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: email, password: newPassword }),
+    });
+    assert.equal(newLoginRes.status, 200);
+    const newLoginBody = await newLoginRes.json();
+    assert.ok(newLoginBody.accessToken);
+
     const auditLogs = await prisma.auditLog.findMany({
       where: { entityType: 'User', entityId: user.id, action: 'PASSWORD_CHANGED' },
     });
@@ -243,9 +256,137 @@ test('Live DB: PATCH /api/v1/users/me/password revokes active refresh sessions s
     assert.equal(auditLogs[0].actorId, user.id);
     assert.deepEqual(auditLogs[0].newData, { sessionsRevoked: true });
   } finally {
-    server.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     if (userIds.length > 0) {
       await prisma.auditLog.deleteMany({ where: { entityId: { in: userIds } } }).catch(() => {});
+      await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
+    }
+  }
+});
+
+test('Live DB: POST /api/v1/users/me/avatar persists avatarUrl & avatarCloudinaryPublicId (VarChar(255)) and cleans up prior assets sequentially & concurrently', async (t) => {
+  if (
+    !(await checkProfileSchemaReady(t, [
+      'avatar_url',
+      'avatar_cloudinary_public_id',
+      'date_of_birth',
+      'address',
+    ]))
+  ) {
+    return;
+  }
+
+  const originalUploadStream = mediaService.uploadStream.bind(mediaService);
+  const originalDeleteResource = mediaService.deleteResource.bind(mediaService);
+  const uploadedPublicIds: string[] = [];
+  const deletedPublicIds: string[] = [];
+
+  mediaService.uploadStream = async (_buffer: Buffer, options) => {
+    const publicId = options.publicId ?? `rentmate/avatars/fallback_${Date.now()}`;
+    uploadedPublicIds.push(publicId);
+    return {
+      secureUrl: `https://res.cloudinary.com/demo/image/upload/v1/${publicId}.webp`,
+      publicId,
+    };
+  };
+  mediaService.deleteResource = async (publicId: string) => {
+    deletedPublicIds.push(publicId);
+    return true;
+  };
+
+  const suffix = `${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+  const userIds: string[] = [];
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const phone = `06${String(Math.floor(Math.random() * 100000000)).padStart(8, '0')}`;
+
+    const user = await prisma.user.create({
+      data: {
+        fullName: 'Avatar Integration User',
+        email: `p3-avatar-${suffix}@rentmate.test`,
+        phone,
+        passwordHash: 'test-only',
+        role: 'TENANT',
+        accountStatus: 'ACTIVE',
+      },
+    });
+    userIds.push(user.id);
+
+    const token = signAccessToken(user.id);
+
+    // 1. Initial upload persists avatarUrl & avatarCloudinaryPublicId (VarChar(255))
+    const form1 = new FormData();
+    form1.append('avatar', new Blob([VALID_JPEG_BUFFER], { type: 'image/jpeg' }), 'first.jpg');
+    const res1 = await fetch(`${baseUrl}/api/v1/users/me/avatar`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form1,
+    });
+    assert.equal(res1.status, 200);
+    const body1 = await res1.json();
+
+    const dbAfterFirst = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { avatarUrl: true, avatarCloudinaryPublicId: true },
+    });
+    assert.ok(dbAfterFirst?.avatarCloudinaryPublicId);
+    assert.ok(dbAfterFirst.avatarCloudinaryPublicId.length <= 255);
+    assert.equal(dbAfterFirst.avatarUrl, body1.avatarUrl);
+    assert.equal(uploadedPublicIds.length, 1);
+    assert.deepEqual(deletedPublicIds, []);
+
+    const firstPublicId = dbAfterFirst.avatarCloudinaryPublicId;
+
+    // 2. Concurrent uploads serialize via PostgreSQL FOR UPDATE and clean up all prior assets
+    const form2 = new FormData();
+    form2.append('avatar', new Blob([VALID_PNG_BUFFER], { type: 'image/png' }), 'second.png');
+    const form3 = new FormData();
+    form3.append('avatar', new Blob([VALID_JPEG_BUFFER], { type: 'image/jpeg' }), 'third.jpg');
+
+    const [res2, res3] = await Promise.all([
+      fetch(`${baseUrl}/api/v1/users/me/avatar`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form2,
+      }),
+      fetch(`${baseUrl}/api/v1/users/me/avatar`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: form3,
+      }),
+    ]);
+
+    assert.equal(res2.status, 200);
+    assert.equal(res3.status, 200);
+    assert.equal(uploadedPublicIds.length, 3);
+    assert.equal(new Set(uploadedPublicIds).size, 3);
+
+    const dbAfterConcurrent = await prisma.user.findUnique({
+      where: { id: user.id },
+      select: { avatarUrl: true, avatarCloudinaryPublicId: true },
+    });
+    const finalPublicId = dbAfterConcurrent?.avatarCloudinaryPublicId;
+    assert.ok(finalPublicId);
+    assert.ok(finalPublicId.length <= 255);
+    assert.notEqual(finalPublicId, firstPublicId);
+    assert.equal(
+      dbAfterConcurrent?.avatarUrl,
+      `https://res.cloudinary.com/demo/image/upload/v1/${finalPublicId}.webp`,
+    );
+
+    const expectedDeleted = uploadedPublicIds.filter((id) => id !== finalPublicId);
+    assert.equal(deletedPublicIds.length, 2);
+    assert.deepEqual(new Set(deletedPublicIds), new Set(expectedDeleted));
+    assert.equal(deletedPublicIds.includes(finalPublicId), false);
+  } finally {
+    mediaService.uploadStream = originalUploadStream;
+    mediaService.deleteResource = originalDeleteResource;
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (userIds.length > 0) {
       await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch(() => {});
     }
   }

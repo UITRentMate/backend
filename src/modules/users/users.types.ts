@@ -29,6 +29,11 @@ export interface UpdateUserProfileInput {
   address?: string | null;
 }
 
+export interface UserStatusContextRecord {
+  id: string;
+  accountStatus: string;
+}
+
 export interface UserAvatarContextRecord {
   id: string;
   accountStatus: string;

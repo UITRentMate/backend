@@ -8,7 +8,6 @@ import { ApiError } from '../../src/common/errors/api-error';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { signAccessToken } from '../../src/modules/auth/auth.security';
 import { BCRYPT_ROUNDS } from '../../src/modules/auth/auth.service';
-import { UsersRepository } from '../../src/modules/users/users.repository';
 import { changeMyPassword } from '../../src/modules/users/users.service';
 import { validateChangePassword } from '../../src/modules/users/users.validation';
 
@@ -66,6 +65,51 @@ describe('users.validation — validateChangePassword', () => {
       currentPassword: CURRENT_PASSWORD,
       newPassword: NEW_PASSWORD,
     });
+  });
+
+  test('enforces exact 72 UTF-8 bytes boundary for ASCII and multi-byte passwords', () => {
+    const exact72Ascii = 'Aa1!' + 'x'.repeat(68);
+    assert.equal(Buffer.byteLength(exact72Ascii, 'utf8'), 72);
+    assert.deepEqual(
+      validateChangePassword({
+        currentPassword: CURRENT_PASSWORD,
+        newPassword: exact72Ascii,
+        confirmNewPassword: exact72Ascii,
+      }),
+      {
+        currentPassword: CURRENT_PASSWORD,
+        newPassword: exact72Ascii,
+      },
+    );
+
+    const exact72MultiByte = 'Aa1!' + 'é'.repeat(34);
+    assert.equal(Buffer.byteLength(exact72MultiByte, 'utf8'), 72);
+    assert.deepEqual(
+      validateChangePassword({
+        currentPassword: CURRENT_PASSWORD,
+        newPassword: exact72MultiByte,
+        confirmNewPassword: exact72MultiByte,
+      }),
+      {
+        currentPassword: CURRENT_PASSWORD,
+        newPassword: exact72MultiByte,
+      },
+    );
+
+    const over72Ascii = 'Aa1!' + 'x'.repeat(69);
+    const over72MultiByte = 'Aa1!' + 'é'.repeat(35);
+    for (const badNewPassword of [over72Ascii, over72MultiByte]) {
+      assert.throws(
+        () =>
+          validateChangePassword({
+            currentPassword: CURRENT_PASSWORD,
+            newPassword: badNewPassword,
+            confirmNewPassword: badNewPassword,
+          }),
+        (err: unknown) =>
+          err instanceof ApiError && err.statusCode === 400 && err.code === 'VALIDATION_ERROR',
+      );
+    }
   });
 
   test('rejects weak newPassword and >72 UTF-8 byte passwords', () => {
@@ -173,18 +217,39 @@ describe('users.validation — validateChangePassword', () => {
 });
 
 describe('users.service — changeMyPassword', () => {
-  test('hashes new password with BCRYPT_ROUNDS (12) and revokes sessions via repository', async () => {
+  test('hashes new password with BCRYPT_ROUNDS (12) and mutates inside Serializable transaction with FOR UPDATE', async () => {
     const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
     let capturedHash = '';
+    let capturedIsolation = '';
+    let lockQueryCalled = false;
 
-    stub(UsersRepository, 'findPasswordContextById', async (userId: string) => {
-      assert.equal(userId, baseUser.id);
+    stub(prisma.user, 'findUnique', async (args: any) => {
+      assert.equal(args.where.id, baseUser.id);
       return { id: baseUser.id, accountStatus: 'ACTIVE', passwordHash: oldHash };
     });
 
-    stub(UsersRepository, 'changePasswordAndRevokeSessions', async (userId: string, newHash: string) => {
-      assert.equal(userId, baseUser.id);
-      capturedHash = newHash;
+    const txClient = {
+      $queryRaw: async () => {
+        lockQueryCalled = true;
+        return [{ id: baseUser.id, account_status: 'ACTIVE', password_hash: oldHash }];
+      },
+      user: {
+        update: async (args: any) => {
+          assert.equal(args.where.id, baseUser.id);
+          capturedHash = args.data.passwordHash;
+          return { id: baseUser.id };
+        },
+      },
+      refreshSession: {
+        updateMany: async () => ({ count: 1 }),
+      },
+      auditLog: {
+        create: async () => ({ id: 'audit-1' }),
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any, options: any) => {
+      capturedIsolation = options?.isolationLevel;
+      return callback(txClient);
     });
 
     const result = await changeMyPassword(baseUser.id, {
@@ -193,22 +258,103 @@ describe('users.service — changeMyPassword', () => {
     });
 
     assert.deepEqual(result, { message: 'Đổi mật khẩu thành công. Vui lòng đăng nhập lại' });
+    assert.equal(capturedIsolation, Prisma.TransactionIsolationLevel.Serializable);
+    assert.equal(lockQueryCalled, true);
     assert.equal(BCRYPT_ROUNDS, 12);
     assert.equal(bcrypt.getRounds(capturedHash), 12);
     assert.equal(await bcrypt.compare(NEW_PASSWORD, capturedHash), true);
   });
 
-  test('throws 400 INVALID_CURRENT_PASSWORD when currentPassword does not match', async () => {
+  test('retries on Prisma P2034 serialization conflict and succeeds on subsequent attempt', async () => {
     const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
-    let repoCalled = false;
+    let attempts = 0;
 
-    stub(UsersRepository, 'findPasswordContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       passwordHash: oldHash,
     }));
-    stub(UsersRepository, 'changePasswordAndRevokeSessions', async () => {
-      repoCalled = true;
+
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'ACTIVE', password_hash: oldHash }],
+      user: { update: async () => ({ id: baseUser.id }) },
+      refreshSession: { updateMany: async () => ({ count: 1 }) },
+      auditLog: { create: async () => ({ id: 'audit-1' }) },
+    };
+
+    stub(prisma, '$transaction', async (callback: any, options: any) => {
+      assert.equal(options?.isolationLevel, Prisma.TransactionIsolationLevel.Serializable);
+      attempts++;
+      if (attempts === 1) {
+        throw { code: 'P2034' };
+      }
+      return callback(txClient);
+    });
+
+    const result = await changeMyPassword(baseUser.id, {
+      currentPassword: CURRENT_PASSWORD,
+      newPassword: NEW_PASSWORD,
+    });
+
+    assert.equal(attempts, 2);
+    assert.deepEqual(result, { message: 'Đổi mật khẩu thành công. Vui lòng đăng nhập lại' });
+  });
+
+  test('rejects concurrent password change when locked passwordHash differs from pre-check passwordHash without overwriting', async () => {
+    const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
+    const committedConcurrentHash = await bcrypt.hash('ConcurrentPass@999', 4);
+    let userUpdateCalled = false;
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: baseUser.id,
+      accountStatus: 'ACTIVE',
+      passwordHash: oldHash,
+    }));
+
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: 'ACTIVE',
+          password_hash: committedConcurrentHash,
+        },
+      ],
+      user: {
+        update: async () => {
+          userUpdateCalled = true;
+          return { id: baseUser.id };
+        },
+      },
+      refreshSession: { updateMany: async () => ({ count: 0 }) },
+      auditLog: { create: async () => ({ id: 'audit-1' }) },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
+
+    await assert.rejects(
+      () =>
+        changeMyPassword(baseUser.id, {
+          currentPassword: CURRENT_PASSWORD,
+          newPassword: NEW_PASSWORD,
+        }),
+      (err: unknown) =>
+        err instanceof ApiError &&
+        err.statusCode === 400 &&
+        err.code === 'INVALID_CURRENT_PASSWORD',
+    );
+    assert.equal(userUpdateCalled, false);
+  });
+
+  test('throws 400 INVALID_CURRENT_PASSWORD when currentPassword does not match', async () => {
+    const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
+    let txCalled = false;
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: baseUser.id,
+      accountStatus: 'ACTIVE',
+      passwordHash: oldHash,
+    }));
+    stub(prisma, '$transaction', async () => {
+      txCalled = true;
     });
 
     await assert.rejects(
@@ -222,19 +368,18 @@ describe('users.service — changeMyPassword', () => {
         err.statusCode === 400 &&
         err.code === 'INVALID_CURRENT_PASSWORD',
     );
-    assert.equal(repoCalled, false);
+    assert.equal(txCalled, false);
   });
 
-  test('defense-in-depth: throws 400 VALIDATION_ERROR if bcrypt.compare(newPassword, passwordHash) is true', async () => {
+  test('direct service call rejects newPassword === currentPassword with 400 VALIDATION_ERROR', async () => {
     const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
 
-    stub(UsersRepository, 'findPasswordContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       passwordHash: oldHash,
     }));
 
-    // Simulate bcrypt-equivalent password even if string comparison differed
     await assert.rejects(
       () =>
         changeMyPassword(baseUser.id, {
@@ -250,14 +395,14 @@ describe('users.service — changeMyPassword', () => {
   });
 
   test('maps missing user to 401 UNAUTHORIZED, inactive user to 403 ACCOUNT_LOCKED, and P2025 to 401 UNAUTHORIZED', async () => {
-    stub(UsersRepository, 'findPasswordContextById', async () => null);
+    stub(prisma.user, 'findUnique', async () => null);
     await assert.rejects(
       () => changeMyPassword(baseUser.id, { currentPassword: CURRENT_PASSWORD, newPassword: NEW_PASSWORD }),
       (err: unknown) =>
         err instanceof ApiError && err.statusCode === 401 && err.code === 'UNAUTHORIZED',
     );
 
-    stub(UsersRepository, 'findPasswordContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'LOCKED',
       passwordHash: 'hash',
@@ -269,12 +414,12 @@ describe('users.service — changeMyPassword', () => {
     );
 
     const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
-    stub(UsersRepository, 'findPasswordContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       passwordHash: oldHash,
     }));
-    stub(UsersRepository, 'changePasswordAndRevokeSessions', async () => {
+    stub(prisma, '$transaction', async () => {
       throw { code: 'P2025' };
     });
     await assert.rejects(
@@ -301,6 +446,7 @@ describe('HTTP PATCH /api/v1/users/me/password', () => {
     });
 
     const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'ACTIVE', password_hash: oldHash }],
       user: {
         update: async (args: any) => {
           assert.equal(args.where.id, baseUser.id);
@@ -323,7 +469,10 @@ describe('HTTP PATCH /api/v1/users/me/password', () => {
       },
     };
 
-    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
+    stub(prisma, '$transaction', async (callback: any, options: any) => {
+      assert.equal(options?.isolationLevel, Prisma.TransactionIsolationLevel.Serializable);
+      return callback(txClient);
+    });
 
     const { response, body } = await request('/api/v1/users/me/password', {
       method: 'PATCH',
@@ -367,6 +516,37 @@ describe('HTTP PATCH /api/v1/users/me/password', () => {
     assert.equal(serializedAudit.includes(NEW_PASSWORD), false);
     assert.equal(serializedAudit.includes(oldHash), false);
     assert.equal(serializedAudit.includes(updatedPasswordHash), false);
+  });
+
+  test('transaction failure returns 500 and does NOT clear refreshToken cookie', async () => {
+    const oldHash = await bcrypt.hash(CURRENT_PASSWORD, 4);
+
+    stub(prisma.user, 'findUnique', async (args: any) => {
+      if (args?.select?.passwordHash) {
+        return { id: baseUser.id, accountStatus: 'ACTIVE', passwordHash: oldHash };
+      }
+      return baseUser;
+    });
+    stub(prisma, '$transaction', async () => {
+      throw new Error('database unavailable');
+    });
+
+    const { response, body } = await request('/api/v1/users/me/password', {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${signAccessToken(baseUser.id)}`,
+      },
+      body: JSON.stringify({
+        currentPassword: CURRENT_PASSWORD,
+        newPassword: NEW_PASSWORD,
+        confirmNewPassword: NEW_PASSWORD,
+      }),
+    });
+
+    assert.equal(response.status, 500);
+    assert.equal(body.code, 'INTERNAL_ERROR');
+    assert.equal(response.headers.get('set-cookie'), null);
   });
 
   test('wrong currentPassword returns 400 INVALID_CURRENT_PASSWORD without updating DB or clearing cookie', async () => {

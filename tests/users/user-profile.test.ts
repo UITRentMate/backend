@@ -227,16 +227,42 @@ describe('users.service — getCurrentUser & updateCurrentUser', () => {
   });
 
   test('updateCurrentUser maps Prisma P2002 on phone to 409 PHONE_ALREADY_EXISTS', async () => {
-    stub(UsersRepository, 'findProfileById', async () => baseUser);
-    stub(UsersRepository, 'updateProfileById', async () => {
-      throw { code: 'P2002', meta: { target: ['phone'] } };
-    });
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'ACTIVE' }],
+      user: {
+        update: async () => {
+          throw { code: 'P2002', meta: { target: ['phone'] } };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     await assert.rejects(
       () => updateCurrentUser(baseUser.id, { phone: '0999888777' }),
       (err: unknown) =>
         err instanceof ApiError && err.statusCode === 409 && err.code === 'PHONE_ALREADY_EXISTS',
     );
+  });
+
+  test('updateCurrentUser rejects LOCKED account inside FOR UPDATE transaction without calling tx.user.update', async () => {
+    let updateCalled = false;
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'LOCKED' }],
+      user: {
+        update: async () => {
+          updateCalled = true;
+          return baseUser;
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
+
+    await assert.rejects(
+      () => updateCurrentUser(baseUser.id, { fullName: 'Nguyen Van B' }),
+      (err: unknown) =>
+        err instanceof ApiError && err.statusCode === 403 && err.code === 'ACCOUNT_LOCKED',
+    );
+    assert.equal(updateCalled, false);
   });
 });
 
@@ -332,18 +358,54 @@ describe('HTTP GET /api/v1/users/me & PUT /api/v1/users/me', () => {
     assert.equal(locked.body.code, 'ACCOUNT_LOCKED');
   });
 
-  test('PUT /api/v1/users/me performs partial update and returns 200 flat user DTO', async () => {
+  test('PUT /api/v1/users/me returns 403 ACCOUNT_LOCKED on TOCTOU lock inside transaction without calling tx.user.update', async () => {
+    let updateCalled = false;
+    stub(prisma.user, 'findUnique', async () => baseUser);
+
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'LOCKED' }],
+      user: {
+        update: async () => {
+          updateCalled = true;
+          return baseUser;
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
+
+    const { response, body } = await request('/api/v1/users/me', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${signAccessToken(baseUser.id)}`,
+      },
+      body: JSON.stringify({ fullName: 'Nguyen Van B' }),
+    });
+
+    assert.equal(response.status, 403);
+    assert.equal(body.code, 'ACCOUNT_LOCKED');
+    assert.equal(updateCalled, false);
+  });
+
+  test('PUT /api/v1/users/me performs partial update inside transaction and returns 200 flat user DTO', async () => {
     let capturedUpdateData: any;
     stub(prisma.user, 'findUnique', async () => baseUser);
-    stub(prisma.user, 'update', async (args: any) => {
-      capturedUpdateData = args.data;
-      assert.equal('passwordHash' in args.select, false);
-      assert.equal('avatarCloudinaryPublicId' in args.select, false);
-      return {
-        ...baseUser,
-        ...args.data,
-      };
-    });
+
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'ACTIVE' }],
+      user: {
+        update: async (args: any) => {
+          capturedUpdateData = args.data;
+          assert.equal('passwordHash' in args.select, false);
+          assert.equal('avatarCloudinaryPublicId' in args.select, false);
+          return {
+            ...baseUser,
+            ...args.data,
+          };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     const { response, body } = await request('/api/v1/users/me', {
       method: 'PUT',
@@ -380,13 +442,20 @@ describe('HTTP GET /api/v1/users/me & PUT /api/v1/users/me', () => {
   test('PUT /api/v1/users/me clears dateOfBirth and address when null is passed', async () => {
     let capturedUpdateData: any;
     stub(prisma.user, 'findUnique', async () => baseUser);
-    stub(prisma.user, 'update', async (args: any) => {
-      capturedUpdateData = args.data;
-      return {
-        ...baseUser,
-        ...args.data,
-      };
-    });
+
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'ACTIVE' }],
+      user: {
+        update: async (args: any) => {
+          capturedUpdateData = args.data;
+          return {
+            ...baseUser,
+            ...args.data,
+          };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     const { response, body } = await request('/api/v1/users/me', {
       method: 'PUT',
@@ -409,9 +478,9 @@ describe('HTTP GET /api/v1/users/me & PUT /api/v1/users/me', () => {
 
   test('PUT /api/v1/users/me rejects invalid inputs and forbidden fields with 400 VALIDATION_ERROR', async () => {
     stub(prisma.user, 'findUnique', async () => baseUser);
-    let updateCalled = false;
-    stub(prisma.user, 'update', async () => {
-      updateCalled = true;
+    let txCalled = false;
+    stub(prisma, '$transaction', async () => {
+      txCalled = true;
       return baseUser;
     });
 
@@ -440,14 +509,21 @@ describe('HTTP GET /api/v1/users/me & PUT /api/v1/users/me', () => {
       assert.equal(body.code, 'VALIDATION_ERROR');
     }
 
-    assert.equal(updateCalled, false);
+    assert.equal(txCalled, false);
   });
 
   test('PUT /api/v1/users/me returns 409 PHONE_ALREADY_EXISTS on duplicate phone race', async () => {
     stub(prisma.user, 'findUnique', async () => baseUser);
-    stub(prisma.user, 'update', async () => {
-      throw { code: 'P2002', meta: { target: ['phone'] } };
-    });
+
+    const txClient = {
+      $queryRaw: async () => [{ id: baseUser.id, account_status: 'ACTIVE' }],
+      user: {
+        update: async () => {
+          throw { code: 'P2002', meta: { target: ['phone'] } };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     const { response, body } = await request('/api/v1/users/me', {
       method: 'PUT',

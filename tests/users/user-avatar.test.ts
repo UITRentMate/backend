@@ -6,7 +6,6 @@ import { ApiError } from '../../src/common/errors/api-error';
 import { prisma } from '../../src/infrastructure/database/prisma';
 import { signAccessToken } from '../../src/modules/auth/auth.security';
 import { mediaService } from '../../src/modules/media/media.service';
-import { UsersRepository } from '../../src/modules/users/users.repository';
 import { uploadMyAvatar } from '../../src/modules/users/users.service';
 
 process.env.JWT_SECRET = 'test-secret-must-have-at-least-thirty-two-bytes';
@@ -62,13 +61,14 @@ async function request(path: string, init: RequestInit = {}) {
 }
 
 describe('users.service — uploadMyAvatar', () => {
-  test('uploads 512x512 face-cropped avatar, updates DB, returns full UserProfileDTO, and deletes old avatar', async () => {
+  test('uploads 512x512 face-cropped avatar, updates DB in transaction with FOR UPDATE, returns full UserProfileDTO, and deletes old avatar', async () => {
     let capturedUploadOptions: any;
-    let capturedUpdateInput: any;
+    let capturedUpdateArgs: any;
+    let lockQueryCalled = false;
     const deletedPublicIds: string[] = [];
 
-    stub(UsersRepository, 'findAvatarContextById', async (userId: string) => {
-      assert.equal(userId, baseUser.id);
+    stub(prisma.user, 'findUnique', async (args: any) => {
+      assert.equal(args.where.id, baseUser.id);
       return {
         id: baseUser.id,
         accountStatus: 'ACTIVE',
@@ -85,21 +85,36 @@ describe('users.service — uploadMyAvatar', () => {
       };
     });
 
-    stub(UsersRepository, 'updateAvatarById', async (userId: string, input: any) => {
-      assert.equal(userId, baseUser.id);
-      capturedUpdateInput = input;
-      return {
-        id: baseUser.id,
-        fullName: baseUser.fullName,
-        email: baseUser.email,
-        phone: baseUser.phone,
-        role: baseUser.role,
-        accountStatus: baseUser.accountStatus,
-        avatarUrl: input.avatarUrl,
-        dateOfBirth: baseUser.dateOfBirth,
-        address: baseUser.address,
-      };
-    });
+    const txClient = {
+      $queryRaw: async () => {
+        lockQueryCalled = true;
+        return [
+          {
+            id: baseUser.id,
+            account_status: 'ACTIVE',
+            avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+          },
+        ];
+      },
+      user: {
+        update: async (args: any) => {
+          assert.equal(args.where.id, baseUser.id);
+          capturedUpdateArgs = args;
+          return {
+            id: baseUser.id,
+            fullName: baseUser.fullName,
+            email: baseUser.email,
+            phone: baseUser.phone,
+            role: baseUser.role,
+            accountStatus: baseUser.accountStatus,
+            avatarUrl: args.data.avatarUrl,
+            dateOfBirth: baseUser.dateOfBirth,
+            address: baseUser.address,
+          };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async (publicId: string) => {
       deletedPublicIds.push(publicId);
@@ -108,9 +123,10 @@ describe('users.service — uploadMyAvatar', () => {
 
     const result = await uploadMyAvatar(baseUser.id, VALID_JPEG_BUFFER);
 
+    assert.equal(lockQueryCalled, true);
     assert.match(
       capturedUploadOptions.publicId,
-      new RegExp(`^rentmate/avatars/${baseUser.id}/avatar_\\d+$`),
+      new RegExp(`^rentmate/avatars/${baseUser.id}/avatar_\\d+_[0-9a-f]{8}$`),
     );
     assert.deepEqual(capturedUploadOptions.transformation, {
       width: 512,
@@ -118,7 +134,7 @@ describe('users.service — uploadMyAvatar', () => {
       crop: 'fill',
       gravity: 'face',
     });
-    assert.deepEqual(capturedUpdateInput, {
+    assert.deepEqual(capturedUpdateArgs.data, {
       avatarUrl: 'https://res.cloudinary.com/demo/image/upload/v2/rentmate/avatars/new.webp',
       avatarCloudinaryPublicId: capturedUploadOptions.publicId,
     });
@@ -141,7 +157,7 @@ describe('users.service — uploadMyAvatar', () => {
   test('first-time upload when avatarCloudinaryPublicId is null does not call deleteResource', async () => {
     let deleteCalled = false;
 
-    stub(UsersRepository, 'findAvatarContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       avatarCloudinaryPublicId: null,
@@ -152,17 +168,29 @@ describe('users.service — uploadMyAvatar', () => {
       publicId: options.publicId,
     }));
 
-    stub(UsersRepository, 'updateAvatarById', async (_userId: string, input: any) => ({
-      id: baseUser.id,
-      fullName: baseUser.fullName,
-      email: baseUser.email,
-      phone: baseUser.phone,
-      role: baseUser.role,
-      accountStatus: baseUser.accountStatus,
-      avatarUrl: input.avatarUrl,
-      dateOfBirth: null,
-      address: null,
-    }));
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: 'ACTIVE',
+          avatar_cloudinary_public_id: null,
+        },
+      ],
+      user: {
+        update: async (args: any) => ({
+          id: baseUser.id,
+          fullName: baseUser.fullName,
+          email: baseUser.email,
+          phone: baseUser.phone,
+          role: baseUser.role,
+          accountStatus: baseUser.accountStatus,
+          avatarUrl: args.data.avatarUrl,
+          dateOfBirth: null,
+          address: null,
+        }),
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async () => {
       deleteCalled = true;
@@ -180,7 +208,7 @@ describe('users.service — uploadMyAvatar', () => {
   test('rolls back newly uploaded Cloudinary asset if DB update fails', async () => {
     const deletedPublicIds: string[] = [];
 
-    stub(UsersRepository, 'findAvatarContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       avatarCloudinaryPublicId: baseUser.avatarCloudinaryPublicId,
@@ -191,9 +219,21 @@ describe('users.service — uploadMyAvatar', () => {
       publicId: 'rentmate/avatars/new-public-id',
     }));
 
-    stub(UsersRepository, 'updateAvatarById', async () => {
-      throw new Error('DB update failed');
-    });
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: 'ACTIVE',
+          avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+        },
+      ],
+      user: {
+        update: async () => {
+          throw new Error('DB update failed');
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async (publicId: string) => {
       deletedPublicIds.push(publicId);
@@ -211,7 +251,7 @@ describe('users.service — uploadMyAvatar', () => {
   test('maps Prisma P2025 on DB update to 401 UNAUTHORIZED after rolling back Cloudinary asset', async () => {
     const deletedPublicIds: string[] = [];
 
-    stub(UsersRepository, 'findAvatarContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       avatarCloudinaryPublicId: null,
@@ -222,9 +262,21 @@ describe('users.service — uploadMyAvatar', () => {
       publicId: 'rentmate/avatars/new-public-id',
     }));
 
-    stub(UsersRepository, 'updateAvatarById', async () => {
-      throw { code: 'P2025' };
-    });
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: 'ACTIVE',
+          avatar_cloudinary_public_id: null,
+        },
+      ],
+      user: {
+        update: async () => {
+          throw { code: 'P2025' };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async (publicId: string) => {
       deletedPublicIds.push(publicId);
@@ -240,8 +292,183 @@ describe('users.service — uploadMyAvatar', () => {
     assert.deepEqual(deletedPublicIds, ['rentmate/avatars/new-public-id']);
   });
 
+  test('TOCTOU: accountStatus becoming LOCKED between pre-check and transaction lock throws 403 ACCOUNT_LOCKED and rolls back newly uploaded asset', async () => {
+    const deletedPublicIds: string[] = [];
+    let updateCalled = false;
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: baseUser.id,
+      accountStatus: 'ACTIVE',
+      avatarCloudinaryPublicId: baseUser.avatarCloudinaryPublicId,
+    }));
+
+    stub(mediaService, 'uploadStream', async () => ({
+      secureUrl: 'https://res.cloudinary.com/demo/image/upload/v2/rentmate/avatars/toctou.webp',
+      publicId: 'rentmate/avatars/toctou-public-id',
+    }));
+
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: 'LOCKED',
+          avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+        },
+      ],
+      user: {
+        update: async () => {
+          updateCalled = true;
+          return baseUser;
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
+
+    stub(mediaService, 'deleteResource', async (publicId: string) => {
+      deletedPublicIds.push(publicId);
+      return true;
+    });
+
+    await assert.rejects(
+      () => uploadMyAvatar(baseUser.id, VALID_JPEG_BUFFER),
+      (err: unknown) =>
+        err instanceof ApiError && err.statusCode === 403 && err.code === 'ACCOUNT_LOCKED',
+    );
+
+    assert.equal(updateCalled, false);
+    assert.deepEqual(deletedPublicIds, ['rentmate/avatars/toctou-public-id']);
+  });
+
+  test('rollback path logs console.warn when mediaService.deleteResource returns false', async () => {
+    const warnings: string[] = [];
+    stub(console, 'warn', (...args: unknown[]) => {
+      warnings.push(args.map((arg) => String(arg)).join(' '));
+    });
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: baseUser.id,
+      accountStatus: 'ACTIVE',
+      avatarCloudinaryPublicId: null,
+    }));
+
+    stub(mediaService, 'uploadStream', async () => ({
+      secureUrl: 'https://res.cloudinary.com/demo/image/upload/v2/rentmate/avatars/new.webp',
+      publicId: 'rentmate/avatars/rollback-false-id',
+    }));
+
+    stub(prisma, '$transaction', async () => {
+      throw new Error('DB failure');
+    });
+
+    stub(mediaService, 'deleteResource', async () => false);
+
+    await assert.rejects(
+      () => uploadMyAvatar(baseUser.id, VALID_JPEG_BUFFER),
+      { message: 'DB failure' },
+    );
+
+    assert.equal(
+      warnings.some((msg) => msg.includes('rentmate/avatars/rollback-false-id')),
+      true,
+    );
+  });
+
+  test('concurrent 2-upload serialization yields distinct publicIds and 2nd call deletes 1st call publicId so zero intermediate images are orphaned', async () => {
+    const dbState = {
+      accountStatus: 'ACTIVE',
+      avatarCloudinaryPublicId: 'rentmate/avatars/initial-id' as string | null,
+      avatarUrl: 'https://res.cloudinary.com/demo/image/upload/v1/initial.webp' as string | null,
+    };
+    const uploadedPublicIds: string[] = [];
+    const deletedPublicIds: string[] = [];
+    let txLock: Promise<void> = Promise.resolve();
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: baseUser.id,
+      accountStatus: dbState.accountStatus,
+      avatarCloudinaryPublicId: dbState.avatarCloudinaryPublicId,
+    }));
+
+    stub(mediaService, 'uploadStream', async (_buffer: Buffer, options: any) => {
+      uploadedPublicIds.push(options.publicId);
+      // Stagger upload completion slightly while keeping publicId generation within ~0-1ms
+      await new Promise((resolve) => setTimeout(resolve, uploadedPublicIds.length === 1 ? 15 : 5));
+      return {
+        secureUrl: `https://res.cloudinary.com/demo/image/upload/v2/${options.publicId}.webp`,
+        publicId: options.publicId,
+      };
+    });
+
+    stub(prisma, '$transaction', async (callback: any) => {
+      const previousLock = txLock;
+      let releaseLock!: () => void;
+      txLock = new Promise<void>((resolve) => {
+        releaseLock = resolve;
+      });
+
+      await previousLock;
+      try {
+        const txClient = {
+          $queryRaw: async () => [
+            {
+              id: baseUser.id,
+              account_status: dbState.accountStatus,
+              avatar_cloudinary_public_id: dbState.avatarCloudinaryPublicId,
+            },
+          ],
+          user: {
+            update: async (args: any) => {
+              dbState.avatarUrl = args.data.avatarUrl;
+              dbState.avatarCloudinaryPublicId = args.data.avatarCloudinaryPublicId;
+              return {
+                id: baseUser.id,
+                fullName: baseUser.fullName,
+                email: baseUser.email,
+                phone: baseUser.phone,
+                role: baseUser.role,
+                accountStatus: dbState.accountStatus,
+                avatarUrl: dbState.avatarUrl,
+                dateOfBirth: baseUser.dateOfBirth,
+                address: baseUser.address,
+              };
+            },
+          },
+        };
+        return await callback(txClient);
+      } finally {
+        releaseLock();
+      }
+    });
+
+    stub(mediaService, 'deleteResource', async (publicId: string) => {
+      deletedPublicIds.push(publicId);
+      return true;
+    });
+
+    const [res1, res2] = await Promise.all([
+      uploadMyAvatar(baseUser.id, VALID_JPEG_BUFFER),
+      uploadMyAvatar(baseUser.id, VALID_PNG_BUFFER),
+    ]);
+
+    assert.equal(uploadedPublicIds.length, 2);
+    assert.notEqual(uploadedPublicIds[0], uploadedPublicIds[1]);
+    assert.ok(res1.avatarUrl);
+    assert.ok(res2.avatarUrl);
+
+    // Because upload #2 finishes uploadStream faster (5ms vs 15ms), it enters tx first and deletes initial-id;
+    // upload #1 then acquires the row lock, sees upload #2's publicId as previousPublicId, and deletes it!
+    // Regardless of which finishes first, exactly initial-id + the losing upload are deleted, and only the winner remains in DB.
+    const finalPublicId = dbState.avatarCloudinaryPublicId!;
+    const losingPublicId = uploadedPublicIds.find((id) => id !== finalPublicId)!;
+    assert.ok(losingPublicId);
+    assert.equal(deletedPublicIds.includes('rentmate/avatars/initial-id'), true);
+    assert.equal(deletedPublicIds.includes(losingPublicId), true);
+    assert.equal(deletedPublicIds.includes(finalPublicId), false);
+    assert.equal(deletedPublicIds.length, 2);
+  });
+
   test('best-effort old avatar deletion failure or throw does not fail uploadMyAvatar', async () => {
-    stub(UsersRepository, 'findAvatarContextById', async () => ({
+    stub(prisma.user, 'findUnique', async () => ({
       id: baseUser.id,
       accountStatus: 'ACTIVE',
       avatarCloudinaryPublicId: baseUser.avatarCloudinaryPublicId,
@@ -252,17 +479,29 @@ describe('users.service — uploadMyAvatar', () => {
       publicId: 'rentmate/avatars/new-public-id',
     }));
 
-    stub(UsersRepository, 'updateAvatarById', async (_userId: string, input: any) => ({
-      id: baseUser.id,
-      fullName: baseUser.fullName,
-      email: baseUser.email,
-      phone: baseUser.phone,
-      role: baseUser.role,
-      accountStatus: baseUser.accountStatus,
-      avatarUrl: input.avatarUrl,
-      dateOfBirth: baseUser.dateOfBirth,
-      address: baseUser.address,
-    }));
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: 'ACTIVE',
+          avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+        },
+      ],
+      user: {
+        update: async (args: any) => ({
+          id: baseUser.id,
+          fullName: baseUser.fullName,
+          email: baseUser.email,
+          phone: baseUser.phone,
+          role: baseUser.role,
+          accountStatus: baseUser.accountStatus,
+          avatarUrl: args.data.avatarUrl,
+          dateOfBirth: baseUser.dateOfBirth,
+          address: baseUser.address,
+        }),
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async () => {
       throw new Error('Cloudinary cleanup failed');
@@ -364,6 +603,24 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
     assert.equal(body.code, 'FILE_TOO_LARGE');
   });
 
+  test('returns 415 UNSUPPORTED_MEDIA_TYPE for 0-byte file with image/jpeg MIME', async () => {
+    stub(prisma.user, 'findUnique', async () => baseUser);
+
+    const formData = new FormData();
+    formData.append('avatar', new Blob([Buffer.alloc(0)], { type: 'image/jpeg' }), 'empty.jpg');
+
+    const { response, body } = await request('/api/v1/users/me/avatar', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${signAccessToken(baseUser.id)}`,
+      },
+      body: formData,
+    });
+
+    assert.equal(response.status, 415);
+    assert.equal(body.code, 'UNSUPPORTED_MEDIA_TYPE');
+  });
+
   test('returns 415 UNSUPPORTED_MEDIA_TYPE for unsupported MIME type or spoofed magic bytes', async () => {
     stub(prisma.user, 'findUnique', async () => baseUser);
 
@@ -415,6 +672,40 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
     assert.equal(mismatchRes.body.code, 'UNSUPPORTED_MEDIA_TYPE');
   });
 
+  test('returns 500 when mediaService.uploadStream rejects and never calls DB transaction or update', async () => {
+    let txCalled = false;
+
+    stub(prisma.user, 'findUnique', async () => ({
+      id: baseUser.id,
+      role: baseUser.role,
+      accountStatus: baseUser.accountStatus,
+      fullName: baseUser.fullName,
+      avatarCloudinaryPublicId: baseUser.avatarCloudinaryPublicId,
+    }));
+
+    stub(mediaService, 'uploadStream', async () => {
+      throw new Error('Cloudinary upload failed');
+    });
+
+    stub(prisma, '$transaction', async () => {
+      txCalled = true;
+    });
+
+    const formData = new FormData();
+    formData.append('avatar', new Blob([VALID_JPEG_BUFFER], { type: 'image/jpeg' }), 'avatar.jpg');
+
+    const { response } = await request('/api/v1/users/me/avatar', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${signAccessToken(baseUser.id)}`,
+      },
+      body: formData,
+    });
+
+    assert.equal(response.status, 500);
+    assert.equal(txCalled, false);
+  });
+
   test('returns 200 OK with full UserProfileDTO, passes 512x512 face transformation, updates DB safely, and deletes old avatar', async () => {
     let capturedUploadOptions: any;
     let capturedUpdateArgs: any;
@@ -436,22 +727,34 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
       };
     });
 
-    stub(prisma.user, 'update', async (args: any) => {
-      capturedUpdateArgs = args;
-      assert.equal('passwordHash' in args.select, false);
-      assert.equal('avatarCloudinaryPublicId' in args.select, false);
-      return {
-        id: baseUser.id,
-        fullName: baseUser.fullName,
-        email: baseUser.email,
-        phone: baseUser.phone,
-        role: baseUser.role,
-        accountStatus: baseUser.accountStatus,
-        avatarUrl: args.data.avatarUrl,
-        dateOfBirth: baseUser.dateOfBirth,
-        address: baseUser.address,
-      };
-    });
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: baseUser.accountStatus,
+          avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+        },
+      ],
+      user: {
+        update: async (args: any) => {
+          capturedUpdateArgs = args;
+          assert.equal('passwordHash' in args.select, false);
+          assert.equal('avatarCloudinaryPublicId' in args.select, false);
+          return {
+            id: baseUser.id,
+            fullName: baseUser.fullName,
+            email: baseUser.email,
+            phone: baseUser.phone,
+            role: baseUser.role,
+            accountStatus: baseUser.accountStatus,
+            avatarUrl: args.data.avatarUrl,
+            dateOfBirth: baseUser.dateOfBirth,
+            address: baseUser.address,
+          };
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async (publicId: string) => {
       deletedPublicIds.push(publicId);
@@ -513,9 +816,21 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
       publicId: 'rentmate/avatars/rollback-id',
     }));
 
-    stub(prisma.user, 'update', async () => {
-      throw new Error('Database error');
-    });
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: baseUser.accountStatus,
+          avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+        },
+      ],
+      user: {
+        update: async () => {
+          throw new Error('Database error');
+        },
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async (publicId: string) => {
       deletedPublicIds.push(publicId);
@@ -551,17 +866,29 @@ describe('HTTP POST /api/v1/users/me/avatar', () => {
       publicId: 'rentmate/avatars/new-id',
     }));
 
-    stub(prisma.user, 'update', async (args: any) => ({
-      id: baseUser.id,
-      fullName: baseUser.fullName,
-      email: baseUser.email,
-      phone: baseUser.phone,
-      role: baseUser.role,
-      accountStatus: baseUser.accountStatus,
-      avatarUrl: args.data.avatarUrl,
-      dateOfBirth: baseUser.dateOfBirth,
-      address: baseUser.address,
-    }));
+    const txClient = {
+      $queryRaw: async () => [
+        {
+          id: baseUser.id,
+          account_status: baseUser.accountStatus,
+          avatar_cloudinary_public_id: baseUser.avatarCloudinaryPublicId,
+        },
+      ],
+      user: {
+        update: async (args: any) => ({
+          id: baseUser.id,
+          fullName: baseUser.fullName,
+          email: baseUser.email,
+          phone: baseUser.phone,
+          role: baseUser.role,
+          accountStatus: baseUser.accountStatus,
+          avatarUrl: args.data.avatarUrl,
+          dateOfBirth: baseUser.dateOfBirth,
+          address: baseUser.address,
+        }),
+      },
+    };
+    stub(prisma, '$transaction', async (callback: any) => callback(txClient));
 
     stub(mediaService, 'deleteResource', async () => false);
 

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 /**
  * Trích xuất public_id từ URL Cloudinary
  * Ví dụ:
@@ -66,7 +68,7 @@ export function buildPropertyCoverPublicId(propertyId: string): string {
  * Tạo public_id cho ảnh đại diện người dùng
  */
 export function buildUserAvatarPublicId(userId: string): string {
-  return `rentmate/avatars/${userId}/avatar_${Date.now()}`;
+  return `rentmate/avatars/${userId}/avatar_${Date.now()}_${randomUUID().slice(0, 8)}`;
 }
 
 /**

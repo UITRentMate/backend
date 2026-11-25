@@ -4,7 +4,8 @@ info:
   version: 1.0.0
   description: |
     Tài liệu đặc tả API (OpenAPI 3.1 Contract) cho phân hệ **Hồ sơ cá nhân người dùng (BE-P3-01 Phần 1, Phần 2 & Phần 3)**.
-    Bao gồm các endpoint xem thông tin hồ sơ cá nhân (`GET /api/v1/users/me`), cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`), tải lên/thay đổi ảnh đại diện (`POST /api/v1/users/me/avatar`), và đổi mật khẩu cá nhân (`PATCH /api/v1/users/me/password`).
+    Bao gồm các endpoint cập nhật thông tin hồ sơ cá nhân (`PUT /api/v1/users/me`), tải lên/thay đổi ảnh đại diện (`POST /api/v1/users/me/avatar`), và đổi mật khẩu cá nhân (`PATCH /api/v1/users/me/password`).
+    Lưu ý: Endpoint `GET /api/v1/users/me` (`operationId: getCurrentUser`, `CurrentUserResponse`) được đặc tả tại `docs/openapi/auth-user.yaml` để tránh trùng lặp path và `operationId` khi gộp các tài liệu OpenAPI.
   contact:
     name: RentMate Engineering Team (SE100 - Nhóm 15)
   license:
@@ -20,31 +21,6 @@ tags:
 
 paths:
   /api/v1/users/me:
-    get:
-      tags:
-        - User Profile
-      summary: Xem thông tin hồ sơ cá nhân hiện tại
-      description: |
-        Trả về đầy đủ thông tin hồ sơ của người dùng đang đăng nhập (`ACTIVE`) qua JWT Bearer token.
-        Giữ tương thích ngược 100% với 6 trường cơ bản (`userId`, `fullName`, `email`, `phone`, `role`, `status`) và bổ sung `avatarUrl`, `dateOfBirth`, `address`.
-        Tuyệt đối không bao giờ trả về `passwordHash` hoặc `avatarCloudinaryPublicId`.
-      operationId: getCurrentUser
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: Thông tin hồ sơ cá nhân người dùng
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/UserProfileResponse'
-        '401':
-          $ref: '#/components/responses/UnauthorizedError'
-        '403':
-          $ref: '#/components/responses/ForbiddenError'
-        '500':
-          $ref: '#/components/responses/InternalError'
-
     put:
       tags:
         - User Profile
@@ -109,7 +85,7 @@ paths:
         Tải lên ảnh đại diện mới cho người dùng đang đăng nhập (`ACTIVE`) qua `multipart/form-data` với tên trường `avatar`.
         - Giới hạn kích thước tối đa 5MB (`413 FILE_TOO_LARGE`).
         - Chỉ hỗ trợ định dạng JPEG, PNG hoặc WebP; xác thực cả MIME type và Magic Bytes nhị phân (`415 UNSUPPORTED_MEDIA_TYPE`).
-        - Ảnh được chuẩn hóa kích thước `512x512` (`crop: fill`, `gravity: face`) trên Cloudinary tại `rentmate/avatars/{userId}/avatar_{timestamp}`.
+        - Ảnh được chuẩn hóa kích thước `512x512` (`crop: fill`, `gravity: face`) trên Cloudinary tại `rentmate/avatars/{userId}/avatar_{timestamp}_{random}`.
         - Nếu cập nhật DB thất bại, ảnh vừa tải lên sẽ được xóa bù trừ trên Cloudinary. Ảnh đại diện cũ (nếu có) sẽ được dọn dẹp best-effort sau khi DB cập nhật thành công.
       operationId: uploadMyAvatar
       security:
