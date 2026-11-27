@@ -1,0 +1,316 @@
+openapi: 3.1.0
+info:
+  title: RentMate API — Hợp đồng và tiền cọc
+  version: 1.0.0
+servers:
+  - url: http://localhost:5000
+paths:
+  /api/v1/contracts/{contractId}/cancel-hold:
+    patch:
+      summary: Hủy giữ chỗ
+      operationId: cancelContractHold
+      description: |
+        Chủ phòng hoặc người thuê đứng tên có thể hủy ở DRAFT, PENDING_TENANT_CONFIRMATION và AWAITING_DEPOSIT.
+        Chủ phòng phải xử lý biên lai PENDING trước khi hủy ở AWAITING_DEPOSIT. Phòng chỉ được giải phóng khi không còn hợp đồng live.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: contractId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              additionalProperties: false
+              properties:
+                reason: { type: string, minLength: 10, maxLength: 500, description: Lý do sau khi bỏ khoảng trắng hai đầu }
+      responses:
+        '200':
+          description: Hợp đồng đã hủy
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Contract'
+                  - properties:
+                      status: { const: CANCELLED }
+        '400':
+          $ref: './rental-requests.yaml#/components/responses/ValidationError'
+        '401':
+          $ref: './rental-requests.yaml#/components/responses/UnauthorizedError'
+        '403':
+          $ref: './rental-requests.yaml#/components/responses/ForbiddenError'
+        '404':
+          description: NOT_FOUND nếu hợp đồng không tồn tại hoặc nằm ngoài phạm vi quyền
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '409':
+          description: CANNOT_CANCEL_AFTER_DEPOSIT_CONFIRMED, PENDING_DEPOSIT_RECEIPT_EXISTS hoặc INVALID_CONTRACT_STATUS
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '500':
+          $ref: './rental-requests.yaml#/components/responses/InternalError'
+  /api/v1/contracts/{contractId}/deposit-receipts:
+    parameters:
+      - name: contractId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      summary: Nộp biên nhận tiền cọc
+      operationId: submitDepositReceipt
+      tags: [Deposits]
+      description: |
+        Người thuê đứng tên nộp một ảnh biên nhận JPEG, PNG hoặc WebP (tối đa 5 MiB).
+        Số tiền phải đạt mức cọc đã chốt. Mỗi hợp đồng chỉ có một biên nhận PENDING.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [amount, proof]
+              properties:
+                amount:
+                  type: string
+                  pattern: '^[0-9]{1,12}(\.[0-9]{1,2})?$'
+                  not: { pattern: '^0+(\.0+)?$' }
+                  description: Số tiền thập phân dương với tối đa hai chữ số lẻ
+                  example: '2000000.00'
+                proof:
+                  type: string
+                  format: binary
+            encoding:
+              proof:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '201':
+          description: Biên nhận đã được ghi nhận với trạng thái PENDING
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DepositReceipt'
+        '400':
+          description: VALIDATION_ERROR, FILE_REQUIRED, INVALID_FILE_UPLOAD hoặc INSUFFICIENT_DEPOSIT_AMOUNT
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '401':
+          $ref: './rental-requests.yaml#/components/responses/UnauthorizedError'
+        '403':
+          $ref: './rental-requests.yaml#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/DepositNotFound'
+        '409':
+          description: INVALID_CONTRACT_STATUS, DEPOSIT_DEADLINE_EXPIRED hoặc DEPOSIT_RECEIPT_ALREADY_PENDING
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '413':
+          description: FILE_TOO_LARGE khi ảnh vượt giới hạn tải lên
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+        '500':
+          $ref: './rental-requests.yaml#/components/responses/InternalError'
+        '502':
+          description: CLOUDINARY_UPLOAD_FAILED khi dịch vụ lưu ảnh không thể tiếp nhận ảnh
+          content:
+            application/json:
+              schema:
+                $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+    get:
+      summary: Xem lịch sử biên nhận tiền cọc
+      operationId: listDepositReceipts
+      tags: [Deposits]
+      description: Người thuê đứng tên hoặc chủ phòng xem toàn bộ lịch sử, mới nhất trước.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Danh sách biên nhận
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DepositReceipt'
+        '400':
+          $ref: './rental-requests.yaml#/components/responses/ValidationError'
+        '401':
+          $ref: './rental-requests.yaml#/components/responses/UnauthorizedError'
+        '403':
+          $ref: './rental-requests.yaml#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/DepositNotFound'
+        '500':
+          $ref: './rental-requests.yaml#/components/responses/InternalError'
+  /api/v1/deposit-receipts/{receiptId}/confirm:
+    patch:
+      summary: Xác nhận đã nhận tiền cọc
+      operationId: confirmDepositReceipt
+      tags: [Deposits]
+      description: Chủ phòng xác nhận biên nhận PENDING. Hợp đồng chuyển sang DEPOSIT_CONFIRMED và phòng tiếp tục được giữ chỗ.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DepositReceiptId'
+      responses:
+        '200':
+          description: Biên nhận và khoản cọc đã xác nhận
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DepositReview'
+                  - properties:
+                      contractStatus: { const: DEPOSIT_CONFIRMED }
+        '400':
+          $ref: './rental-requests.yaml#/components/responses/ValidationError'
+        '401':
+          $ref: './rental-requests.yaml#/components/responses/UnauthorizedError'
+        '403':
+          $ref: './rental-requests.yaml#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/DepositNotFound'
+        '409':
+          $ref: '#/components/responses/DepositReviewConflict'
+        '500':
+          $ref: './rental-requests.yaml#/components/responses/InternalError'
+  /api/v1/deposit-receipts/{receiptId}/reject:
+    patch:
+      summary: Từ chối biên nhận tiền cọc
+      operationId: rejectDepositReceipt
+      tags: [Deposits]
+      description: Chủ phòng từ chối biên nhận PENDING. Hạn nộp lại là mốc muộn hơn giữa hạn cũ và 12 giờ kể từ lúc từ chối.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/DepositReceiptId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [rejectionReason]
+              properties:
+                rejectionReason: { type: string, minLength: 10, maxLength: 1000, description: Lý do sau khi bỏ khoảng trắng hai đầu }
+      responses:
+        '200':
+          description: Biên nhận đã từ chối và hạn nộp lại
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DepositReview'
+                  - properties:
+                      contractStatus: { const: AWAITING_DEPOSIT }
+                      depositDeadlineAt: { type: string, format: date-time }
+        '400':
+          $ref: './rental-requests.yaml#/components/responses/ValidationError'
+        '401':
+          $ref: './rental-requests.yaml#/components/responses/UnauthorizedError'
+        '403':
+          $ref: './rental-requests.yaml#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/DepositNotFound'
+        '409':
+          $ref: '#/components/responses/DepositReviewConflict'
+        '500':
+          $ref: './rental-requests.yaml#/components/responses/InternalError'
+components:
+  parameters:
+    DepositReceiptId:
+      name: receiptId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    DepositNotFound:
+      description: NOT_FOUND khi hợp đồng hoặc biên nhận không tồn tại hay ngoài phạm vi quyền
+      content:
+        application/json:
+          schema:
+            $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+    DepositReviewConflict:
+      description: INVALID_CONTRACT_STATUS hoặc INVALID_DEPOSIT_RECEIPT_STATUS
+      content:
+        application/json:
+          schema:
+            $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    DepositReview:
+      type: object
+      required: [receipt, contractStatus, depositDeadlineAt]
+      properties:
+        receipt:
+          $ref: '#/components/schemas/DepositReceipt'
+        contractStatus: { type: string, enum: [AWAITING_DEPOSIT, DEPOSIT_CONFIRMED] }
+        depositDeadlineAt: { type: [string, "null"], format: date-time }
+    DepositReceipt:
+      type: object
+      required: [id, contractId, amount, proofUrl, status, submittedAt, confirmedById, confirmedAt, rejectionReason]
+      properties:
+        id: { type: string, format: uuid }
+        contractId: { type: string, format: uuid }
+        amount: { type: string, pattern: '^[0-9]{1,12}\.[0-9]{2}$', example: '2000000.00' }
+        proofUrl: { type: string, format: uri }
+        status: { type: string, enum: [PENDING, CONFIRMED, REJECTED] }
+        submittedAt: { type: string, format: date-time }
+        confirmedById: { type: [string, "null"], format: uuid }
+        confirmedAt: { type: [string, "null"], format: date-time }
+        rejectionReason: { type: [string, "null"] }
+    Contract:
+      type: object
+      required: [id, roomId, tenantId, rentalRequestId, startDate, endDate, status, rentSnapshot, depositSnapshot, electricityRate, waterRate, holdExpiresAt, depositDeadlineAt, cancellationReason, serviceFees]
+      properties:
+        id: { type: string, format: uuid }
+        roomId: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        rentalRequestId: { type: [string, "null"], format: uuid }
+        startDate: { type: string, format: date }
+        endDate: { type: string, format: date }
+        status:
+          type: string
+          enum: [DRAFT, PENDING_TENANT_CONFIRMATION, AWAITING_DEPOSIT, DEPOSIT_CONFIRMED, ACTIVE, LIQUIDATING, TERMINATED, CANCELLED, EXPIRED]
+        rentSnapshot: { type: number }
+        depositSnapshot: { type: number }
+        electricityRate: { type: number }
+        waterRate: { type: number }
+        holdExpiresAt: { type: [string, "null"], format: date-time }
+        depositDeadlineAt: { type: [string, "null"], format: date-time }
+        cancellationReason: { type: [string, "null"] }
+        serviceFees:
+          type: array
+          items:
+            type: object
+            required: [feeName, monthlyAmount]
+            properties:
+              feeName: { type: string }
+              monthlyAmount: { type: number }
