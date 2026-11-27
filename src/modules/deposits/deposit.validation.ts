@@ -17,13 +17,23 @@ const receiveProof = multer({
   limits: { files: 1, fields: 1, fieldSize: 16, fileSize: 5 * 1024 * 1024 },
 }).single('proof');
 
+export const validateDepositContractId: RequestHandler = (req, _res, next) => {
+  validateDepositId(req.params.contractId, 'contractId');
+  next();
+};
+
 export const uploadDepositProof: RequestHandler = (req, res, next) => {
   if (!req.is('multipart/form-data')) {
     return next(new ApiError(400, 'FILE_REQUIRED', 'Cần gửi ảnh biên nhận qua multipart/form-data'));
   }
   receiveProof(req, res, (error: unknown) => {
-    if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
-      return next(new ApiError(413, 'FILE_TOO_LARGE', 'Ảnh biên nhận phải có dung lượng tối đa 5 MiB'));
+    if (error instanceof multer.MulterError) {
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        return next(new ApiError(413, 'FILE_TOO_LARGE', 'Ảnh biên nhận phải có dung lượng tối đa 5 MiB'));
+      }
+      if (error.code === 'LIMIT_FIELD_VALUE' || error.code === 'LIMIT_FIELD_COUNT' || error.code === 'LIMIT_FIELD_KEY') {
+        return next(new ApiError(400, 'VALIDATION_ERROR', 'Biểu mẫu chỉ nhận số tiền hợp lệ và một ảnh biên nhận'));
+      }
     }
     if (error) {
       return next(new ApiError(400, 'INVALID_FILE_UPLOAD', 'Dữ liệu tải lên không hợp lệ'));

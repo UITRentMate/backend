@@ -202,7 +202,9 @@ test('PostgreSQL: đối soát cọc, lịch sử, race và hết hạn', {
     assert.deepEqual(body.items.map(({ id, status }) => [id, status]),
       [[replacement.body.id, 'PENDING'], [first.id, 'REJECTED']]);
     const earlyRejection = await review(replacement.body.id, 'reject', landlord.id, reason);
-    assert.equal(earlyRejection.body.depositDeadlineAt, rejected.body.depositDeadlineAt);
+    assert.ok(earlyRejection.body.depositDeadlineAt && earlyRejection.body.receipt.confirmedAt);
+    assert.equal(Date.parse(earlyRejection.body.depositDeadlineAt) - Date.parse(earlyRejection.body.receipt.confirmedAt),
+      PHASE3_TIME_LIMITS_MS.DEPOSIT_REJECT_GRACE_MS);
   });
 
   await t.test('xóa ảnh và commit hết hạn khi thời hạn trôi qua trong lúc upload', async (scenario) => {

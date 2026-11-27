@@ -19,7 +19,12 @@ import {
 type DepositContract = NonNullable<Awaited<ReturnType<typeof findTenantDepositContract>>>;
 
 function toReceiptDto(receipt: ReceiptRow) {
-  return { ...receipt, amount: receipt.amount.toFixed(2) };
+  return {
+    ...receipt,
+    amount: receipt.amount.toFixed(2),
+    submittedAt: receipt.submittedAt.toISOString(),
+    confirmedAt: receipt.confirmedAt?.toISOString() ?? null,
+  };
 }
 
 function contractNotFound() {
@@ -59,7 +64,10 @@ export async function submitDepositReceipt(tenantId: string, contractId: string,
     uploaded = await mediaService.uploadStream(proof, {
       publicId: randomUUID(), folder: `rentmate/deposits/${contractId}`,
     });
-  } catch {
+  } catch (error) {
+    const httpStatus = typeof error === 'object' && error !== null && 'http_code' in error
+      && typeof error.http_code === 'number' ? error.http_code : undefined;
+    console.error('[Deposits] Tải ảnh biên nhận lên Cloudinary thất bại', { contractId, httpStatus });
     throw new ApiError(502, 'CLOUDINARY_UPLOAD_FAILED', 'Không thể lưu ảnh biên nhận');
   }
 
@@ -89,7 +97,11 @@ export async function submitDepositReceipt(tenantId: string, contractId: string,
     }
     if (error instanceof ApiError && error.code === 'DEPOSIT_DEADLINE_EXPIRED') {
       // Dùng luồng chuẩn để khóa phòng trước hợp đồng và commit việc hết hạn độc lập.
-      await expireHoldForContract(contractId);
+      try {
+        await expireHoldForContract(contractId);
+      } catch {
+        console.warn('[Deposits] Không thể cập nhật hợp đồng hết hạn sau khi nộp biên nhận', { contractId });
+      }
     }
     throw error;
   }
@@ -103,8 +115,8 @@ export async function listDepositReceipts(actor: { id: string; role: string }, c
 }
 
 function rejectionDeadline(deadline: Date | null, now: Date) {
-  if (deadline === null || deadline > now) return deadline;
-  return new Date(now.getTime() + PHASE3_TIME_LIMITS_MS.DEPOSIT_REJECT_GRACE_MS);
+  const graceDeadline = new Date(now.getTime() + PHASE3_TIME_LIMITS_MS.DEPOSIT_REJECT_GRACE_MS);
+  return deadline && deadline >= graceDeadline ? deadline : graceDeadline;
 }
 
 export function reviewDepositReceipt(landlordId: string, receiptId: string, review: { rejectionReason?: string }) {
@@ -157,6 +169,6 @@ export function reviewDepositReceipt(landlordId: string, receiptId: string, revi
         relatedEntityId: receiptId,
       },
     });
-    return { receipt: toReceiptDto(receipt), contractStatus, depositDeadlineAt };
+    return { receipt: toReceiptDto(receipt), contractStatus, depositDeadlineAt: depositDeadlineAt?.toISOString() ?? null };
   });
 }

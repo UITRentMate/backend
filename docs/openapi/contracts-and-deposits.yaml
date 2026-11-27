@@ -68,6 +68,7 @@ paths:
     post:
       summary: Nộp biên nhận tiền cọc
       operationId: submitDepositReceipt
+      tags: [Deposits]
       description: |
         Người thuê đứng tên nộp một ảnh biên nhận JPEG, PNG hoặc WebP (tối đa 5 MiB).
         Số tiền phải đạt mức cọc đã chốt. Mỗi hợp đồng chỉ có một biên nhận PENDING.
@@ -136,6 +137,7 @@ paths:
     get:
       summary: Xem lịch sử biên nhận tiền cọc
       operationId: listDepositReceipts
+      tags: [Deposits]
       description: Người thuê đứng tên hoặc chủ phòng xem toàn bộ lịch sử, mới nhất trước.
       security:
         - BearerAuth: []
@@ -166,6 +168,7 @@ paths:
     patch:
       summary: Xác nhận đã nhận tiền cọc
       operationId: confirmDepositReceipt
+      tags: [Deposits]
       description: Chủ phòng xác nhận biên nhận PENDING. Hợp đồng chuyển sang DEPOSIT_CONFIRMED và phòng tiếp tục được giữ chỗ.
       security:
         - BearerAuth: []
@@ -173,7 +176,14 @@ paths:
         - $ref: '#/components/parameters/DepositReceiptId'
       responses:
         '200':
-          $ref: '#/components/responses/DepositReviewed'
+          description: Biên nhận và khoản cọc đã xác nhận
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DepositReview'
+                  - properties:
+                      contractStatus: { const: DEPOSIT_CONFIRMED }
         '400':
           $ref: './rental-requests.yaml#/components/responses/ValidationError'
         '401':
@@ -190,7 +200,8 @@ paths:
     patch:
       summary: Từ chối biên nhận tiền cọc
       operationId: rejectDepositReceipt
-      description: Chủ phòng từ chối biên nhận PENDING. Nếu hạn cọc đã đến, người thuê có thêm 12 giờ để nộp lại.
+      tags: [Deposits]
+      description: Chủ phòng từ chối biên nhận PENDING. Hạn nộp lại là mốc muộn hơn giữa hạn cũ và 12 giờ kể từ lúc từ chối.
       security:
         - BearerAuth: []
       parameters:
@@ -207,7 +218,15 @@ paths:
                 rejectionReason: { type: string, minLength: 10, maxLength: 1000, description: Lý do sau khi bỏ khoảng trắng hai đầu }
       responses:
         '200':
-          $ref: '#/components/responses/DepositReviewed'
+          description: Biên nhận đã từ chối và hạn nộp lại
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/DepositReview'
+                  - properties:
+                      contractStatus: { const: AWAITING_DEPOSIT }
+                      depositDeadlineAt: { type: string, format: date-time }
         '400':
           $ref: './rental-requests.yaml#/components/responses/ValidationError'
         '401':
@@ -234,18 +253,6 @@ components:
         application/json:
           schema:
             $ref: './rental-requests.yaml#/components/schemas/ApiErrorResponse'
-    DepositReviewed:
-      description: Biên nhận sau đối soát, kèm trạng thái và hạn cọc hiện tại của hợp đồng
-      content:
-        application/json:
-          schema:
-            type: object
-            required: [receipt, contractStatus, depositDeadlineAt]
-            properties:
-              receipt:
-                $ref: '#/components/schemas/DepositReceipt'
-              contractStatus: { type: string, enum: [AWAITING_DEPOSIT, DEPOSIT_CONFIRMED] }
-              depositDeadlineAt: { type: [string, "null"], format: date-time }
     DepositReviewConflict:
       description: INVALID_CONTRACT_STATUS hoặc INVALID_DEPOSIT_RECEIPT_STATUS
       content:
@@ -258,6 +265,14 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    DepositReview:
+      type: object
+      required: [receipt, contractStatus, depositDeadlineAt]
+      properties:
+        receipt:
+          $ref: '#/components/schemas/DepositReceipt'
+        contractStatus: { type: string, enum: [AWAITING_DEPOSIT, DEPOSIT_CONFIRMED] }
+        depositDeadlineAt: { type: [string, "null"], format: date-time }
     DepositReceipt:
       type: object
       required: [id, contractId, amount, proofUrl, status, submittedAt, confirmedById, confirmedAt, rejectionReason]

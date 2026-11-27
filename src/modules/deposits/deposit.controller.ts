@@ -3,8 +3,8 @@ import type { Request, Response } from 'express';
 import { listDepositReceipts, reviewDepositReceipt, submitDepositReceipt } from './deposit.service';
 import { validateDepositAmount, validateDepositId, validateDepositRejection } from './deposit.validation';
 
-export async function submitDepositReceiptController(req: Request, res: Response): Promise<void> {
-  const contractId = validateDepositId(req.params.contractId, 'contractId');
+export async function submitDepositReceiptController(req: Request<{ contractId: string }>, res: Response): Promise<void> {
+  const { contractId } = req.params;
   const amount = validateDepositAmount(req.body);
   const receipt = await submitDepositReceipt(res.locals.currentUser!.id, contractId, amount, req.file!.buffer);
   res.status(201).json(receipt);
